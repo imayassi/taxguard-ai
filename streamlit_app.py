@@ -11,12 +11,18 @@ For Streamlit Cloud deployment:
 
 import sys
 import os
-from pathlib import Path
+
+# Get absolute paths
+_this_file = os.path.abspath(__file__)
+_this_dir = os.path.dirname(_this_file)
+_backend_path = os.path.join(_this_dir, "backend")
 
 # Add backend directory to Python path
-backend_path = Path(__file__).parent / "backend"
-sys.path.insert(0, str(backend_path))
-os.chdir(backend_path)
+if _backend_path not in sys.path:
+    sys.path.insert(0, _backend_path)
 
-# Import the app module which runs everything
+# Change working directory to backend
+os.chdir(_backend_path)
+
+# Now import and run the app
 import app

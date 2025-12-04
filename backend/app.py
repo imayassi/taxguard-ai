@@ -14,12 +14,20 @@ Run with: streamlit run app.py
 """
 
 import sys
-from pathlib import Path
+import os
 
 # Add the backend directory to path for imports (needed for Streamlit Cloud)
-backend_dir = Path(__file__).parent.resolve()
-if str(backend_dir) not in sys.path:
-    sys.path.insert(0, str(backend_dir))
+# Use os.path for more reliable path resolution
+_current_file = os.path.abspath(__file__)
+_backend_dir = os.path.dirname(_current_file)
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+
+# Also try parent directory in case running from root
+_parent_dir = os.path.dirname(_backend_dir)
+_parent_backend = os.path.join(_parent_dir, 'backend')
+if os.path.exists(_parent_backend) and _parent_backend not in sys.path:
+    sys.path.insert(0, _parent_backend)
 
 import streamlit as st
 import pandas as pd

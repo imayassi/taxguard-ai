@@ -1047,10 +1047,22 @@ with tab3:
     st.markdown("### 📄 Upload Tax Documents")
     st.markdown("""
         Upload your W-2, 1099, or other tax forms. TaxGuard AI will:
-        1. **Extract** income and withholding information using OCR
+        1. **Extract** income and withholding information
         2. **Remove** all personal information (SSN, names, addresses) before processing
         3. **Auto-fill** your income sources based on the extracted data
+        
+        💡 **You can upload multiple documents** - all income will be aggregated for tax calculations.
     """)
+    
+    # Show current income sources count
+    all_sources = list(st.session_state.enhanced_profile.income_sources)
+    if st.session_state.enhanced_profile.spouse:
+        all_sources.extend(st.session_state.enhanced_profile.spouse.sources)
+    
+    if all_sources:
+        total_income = sum(s.ytd_gross for s in all_sources)
+        total_withheld = sum(s.ytd_federal_withheld for s in all_sources)
+        st.success(f"📊 **Current totals from {len(all_sources)} source(s):** YTD Income: {fmt_currency(total_income)} | YTD Withheld: {fmt_currency(total_withheld)}")
     
     st.markdown("---")
     
@@ -1082,18 +1094,32 @@ with tab3:
     if uploaded_file is not None:
         st.success(f"✅ Uploaded: {uploaded_file.name} ({uploaded_file.size / 1024:.1f} KB)")
         
-        col1, col2 = st.columns(2)
+        st.markdown("---")
+        st.markdown("### ⚙️ Extraction Method")
         
-        with col1:
-            process_btn = st.button(
-                "🔍 Process Document",
-                type="primary",
-                use_container_width=True,
-                key="process_doc_btn"
-            )
+        # AI extraction option BEFORE process button
+        use_ai_extraction = st.checkbox(
+            "🤖 **Use AI-Powered Extraction (Recommended)**",
+            value=True if OPENAI_CLIENT_AVAILABLE else False,
+            disabled=not OPENAI_CLIENT_AVAILABLE,
+            help="GPT-5.1 provides more accurate extraction of financial data from documents",
+            key="use_ai_extraction_main"
+        )
         
-        with col2:
-            st.markdown("")  # Spacer
+        if not OPENAI_CLIENT_AVAILABLE:
+            st.warning("⚠️ AI extraction requires OpenAI API key. Using pattern matching instead.")
+        elif use_ai_extraction:
+            st.info("🤖 AI extraction enabled - GPT-5.1 will analyze your document for accurate data extraction")
+        
+        st.markdown("---")
+        
+        # Process button
+        process_btn = st.button(
+            "🔍 Process Document" + (" with AI" if use_ai_extraction and OPENAI_CLIENT_AVAILABLE else ""),
+            type="primary",
+            use_container_width=True,
+            key="process_doc_btn"
+        )
         
         if process_btn:
             # Show privacy pipeline
@@ -1103,13 +1129,13 @@ with tab3:
             status = st.empty()
             
             # Step 1: Read document
-            status.text("Step 1/4: Reading document...")
-            progress.progress(25)
-            time.sleep(0.5)
+            status.text("Step 1/5: Reading document...")
+            progress.progress(20)
+            time.sleep(0.3)
             
             # Step 2: OCR (if image/PDF)
-            status.text("Step 2/4: Extracting text with OCR...")
-            progress.progress(50)
+            status.text("Step 2/5: Extracting text with OCR...")
+            progress.progress(40)
             
             # Read file content
             file_content = uploaded_file.read()
@@ -1117,7 +1143,6 @@ with tab3:
             
             try:
                 if uploaded_file.type == "application/pdf":
-                    # Try pdfplumber for PDF
                     try:
                         import pdfplumber
                         import io
@@ -1125,10 +1150,9 @@ with tab3:
                             for page in pdf.pages:
                                 extracted_text += page.extract_text() or ""
                     except ImportError:
-                        st.warning("PDF processing requires pdfplumber. Using fallback.")
+                        st.warning("PDF processing requires pdfplumber.")
                         extracted_text = "[PDF content - install pdfplumber for extraction]"
                 else:
-                    # Image - use pytesseract
                     try:
                         from PIL import Image
                         import pytesseract
@@ -1136,242 +1160,51 @@ with tab3:
                         image = Image.open(io.BytesIO(file_content))
                         extracted_text = pytesseract.image_to_string(image)
                     except ImportError:
-                        st.warning("Image OCR requires pytesseract. Using fallback.")
+                        st.warning("Image OCR requires pytesseract.")
                         extracted_text = "[Image content - install pytesseract for extraction]"
                     except Exception as e:
-                        st.warning(f"OCR processing error: {e}")
+                        st.warning(f"OCR error: {e}")
                         extracted_text = "[Could not extract text from image]"
             except Exception as e:
                 st.error(f"Error reading document: {e}")
                 extracted_text = ""
             
-            time.sleep(0.5)
+            time.sleep(0.3)
             
             # Step 3: PII Redaction
-            status.text("Step 3/4: Removing personal information (SSN, names, addresses)...")
-            progress.progress(75)
+            status.text("Step 3/5: Removing personal information (SSN, names, addresses)...")
+            progress.progress(60)
             
-            if extracted_text:
+            if extracted_text and extracted_text[0] != "[":
                 redactor = PIIRedactor(use_ner=False)
                 redaction_result = redactor.redact_sensitive_data(extracted_text)
                 redacted_text = redaction_result.redacted_text
                 pii_count = redaction_result.redaction_count
                 pii_types = redaction_result.pii_types_found
             else:
-                redacted_text = ""
+                redacted_text = extracted_text
                 pii_count = 0
                 pii_types = []
             
-            time.sleep(0.5)
-            
-            # Step 4: Extract financial data
-            status.text("Step 4/4: Extracting financial information...")
-            progress.progress(100)
             time.sleep(0.3)
             
-            # Clear progress
-            progress.empty()
-            status.empty()
-            
-            # Show results
-            st.markdown("---")
-            st.markdown("### 📊 Extraction Results")
-            
-            # Privacy confirmation
-            if pii_count > 0:
-                st.success(f"🛡️ **Privacy Protected**: Removed {pii_count} personal information items")
-                with st.expander("View PII types removed"):
-                    for pii_type in pii_types:
-                        st.markdown(f"- 🚫 {pii_type}")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**Original Document (Preview)**")
-                # Show first 500 chars of original with PII warning
-                if extracted_text:
-                    preview = extracted_text[:500] + ("..." if len(extracted_text) > 500 else "")
-                    st.text_area(
-                        "Contains PII - DO NOT SHARE",
-                        value=preview,
-                        height=200,
-                        disabled=True,
-                        key="original_preview"
-                    )
-                else:
-                    st.warning("Could not extract text from document")
-            
-            with col2:
-                st.markdown("**After PII Removal (Safe)**")
-                if redacted_text:
-                    preview = redacted_text[:500] + ("..." if len(redacted_text) > 500 else "")
-                    st.text_area(
-                        "PII Removed - Safe to process",
-                        value=preview,
-                        height=200,
-                        disabled=True,
-                        key="redacted_preview"
-                    )
-                else:
-                    st.info("No text to display")
-            
-            # Parse extracted data based on document type
-            st.markdown("---")
-            st.markdown("### 💰 Detected Financial Information")
-            
-            # Comprehensive pattern matching for various paystub formats
-            import re
-            
+            # Step 4: Extract financial data
             detected_data = {}
             
-            # Helper function to find dollar amounts near keywords
-            def find_amount_near_keyword(text, keywords, search_range=100):
-                """Find dollar amount near any of the keywords."""
-                text_lower = text.lower()
-                for keyword in keywords:
-                    # Find keyword position
-                    pos = text_lower.find(keyword.lower())
-                    if pos != -1:
-                        # Look for dollar amounts in the surrounding area
-                        start = max(0, pos - 20)
-                        end = min(len(text), pos + search_range)
-                        snippet = text[start:end]
-                        
-                        # Match various dollar formats: $1,234.56 or 1234.56 or 1,234
-                        amounts = re.findall(r'\$?\s*([\d,]+\.?\d{0,2})', snippet)
-                        for amt in amounts:
-                            try:
-                                value = float(amt.replace(",", ""))
-                                if value > 0:  # Ignore zero values
-                                    return value
-                            except:
-                                pass
-                return None
-            
-            # Comprehensive keyword lists for different fields
-            gross_keywords = [
-                "gross pay", "gross earnings", "gross income", "total gross",
-                "gross wages", "total earnings", "earnings gross", "gross amount"
-            ]
-            
-            ytd_gross_keywords = [
-                "ytd gross", "ytd earnings", "ytd total", "year to date gross",
-                "ytd wages", "total ytd", "ytd earn", "gross ytd", "ytd amount"
-            ]
-            
-            federal_keywords = [
-                "federal tax", "fed tax", "federal w/h", "fed w/h", "federal withholding",
-                "fed withholding", "federal income tax", "fit", "fed inc tax",
-                "federal withheld", "fed withheld", "us tax", "federal w-h"
-            ]
-            
-            ytd_federal_keywords = [
-                "ytd federal", "ytd fed", "federal ytd", "fed ytd", "ytd fit",
-                "ytd fed tax", "ytd federal tax", "federal tax ytd", "ytd fed w/h"
-            ]
-            
-            retirement_keywords = [
-                "401k", "401(k)", "retirement", "403b", "403(b)", "tsp",
-                "pension", "def comp", "deferred comp", "401 k"
-            ]
-            
-            ytd_retirement_keywords = [
-                "ytd 401k", "ytd 401(k)", "401k ytd", "ytd retirement",
-                "retirement ytd", "ytd 403b", "ytd pension"
-            ]
-            
-            ss_keywords = [
-                "social security", "soc sec", "ss tax", "fica ss", "oasdi",
-                "social sec", "ss wages"
-            ]
-            
-            medicare_keywords = [
-                "medicare", "med tax", "fica med", "fica medicare"
-            ]
-            
-            state_keywords = [
-                "state tax", "state w/h", "state withholding", "sit",
-                "state income", "state withheld"
-            ]
-            
-            net_keywords = [
-                "net pay", "net amount", "take home", "net earnings", "net check"
-            ]
-            
-            # Try to extract each field
-            # Current period values
-            current_gross = find_amount_near_keyword(redacted_text, gross_keywords)
-            current_federal = find_amount_near_keyword(redacted_text, federal_keywords)
-            current_retirement = find_amount_near_keyword(redacted_text, retirement_keywords)
-            
-            # YTD values (more important for tax calculation)
-            ytd_gross = find_amount_near_keyword(redacted_text, ytd_gross_keywords)
-            ytd_federal = find_amount_near_keyword(redacted_text, ytd_federal_keywords)
-            ytd_retirement = find_amount_near_keyword(redacted_text, ytd_retirement_keywords)
-            
-            # Other values
-            ss_tax = find_amount_near_keyword(redacted_text, ss_keywords)
-            medicare_tax = find_amount_near_keyword(redacted_text, medicare_keywords)
-            state_tax = find_amount_near_keyword(redacted_text, state_keywords)
-            net_pay = find_amount_near_keyword(redacted_text, net_keywords)
-            
-            # Store what we found
-            if current_gross: detected_data["Current Gross Pay"] = current_gross
-            if current_federal: detected_data["Current Federal Tax"] = current_federal
-            if current_retirement: detected_data["Current 401(k)"] = current_retirement
-            if ytd_gross: detected_data["YTD Gross"] = ytd_gross
-            if ytd_federal: detected_data["YTD Federal Tax"] = ytd_federal
-            if ytd_retirement: detected_data["YTD 401(k)"] = ytd_retirement
-            if ss_tax: detected_data["Social Security Tax"] = ss_tax
-            if medicare_tax: detected_data["Medicare Tax"] = medicare_tax
-            if state_tax: detected_data["State Tax"] = state_tax
-            if net_pay: detected_data["Net Pay"] = net_pay
-            
-            # Also try to find any large dollar amounts as fallback
-            all_amounts = re.findall(r'\$\s*([\d,]+\.?\d{0,2})', redacted_text)
-            large_amounts = []
-            for amt in all_amounts:
-                try:
-                    value = float(amt.replace(",", ""))
-                    if value >= 100:  # Ignore small amounts
-                        large_amounts.append(value)
-                except:
-                    pass
-            
-            # Option to use AI for extraction
-            st.markdown("---")
-            
-            col_extract1, col_extract2 = st.columns([1, 1])
-            
-            with col_extract1:
-                use_ai = st.checkbox(
-                    "🤖 Use AI to extract data (more accurate)", 
-                    value=True,
-                    key="use_ai_extraction",
-                    help="Uses GPT-5.1 to intelligently extract financial data from the document"
-                )
-            
-            with col_extract2:
-                if use_ai and OPENAI_CLIENT_AVAILABLE:
-                    ai_extract_btn = st.button("🔍 Extract with AI", type="primary", key="ai_extract_btn")
-                else:
-                    ai_extract_btn = False
-                    if use_ai and not OPENAI_CLIENT_AVAILABLE:
-                        st.warning("AI extraction requires OpenAI API key")
-            
-            # AI-powered extraction
-            if use_ai and ai_extract_btn and OPENAI_CLIENT_AVAILABLE:
-                with st.spinner("🤖 AI is analyzing the document..."):
-                    ai_client = get_ai_client()
-                    
-                    # Create extraction prompt
-                    extraction_prompt = f"""Analyze this redacted paystub/tax document and extract the financial information.
-The document has had all personal information (SSN, names, addresses) removed for privacy.
+            if use_ai_extraction and OPENAI_CLIENT_AVAILABLE and redacted_text and redacted_text[0] != "[":
+                # AI-powered extraction
+                status.text("Step 4/5: AI analyzing document for financial data...")
+                progress.progress(80)
+                
+                ai_client = get_ai_client()
+                
+                extraction_prompt = f"""Analyze this redacted paystub/tax document and extract ALL financial information.
+The document has had personal information (SSN, names, addresses) removed for privacy.
 
 DOCUMENT TEXT:
 {redacted_text}
 
-Please extract and return the following values in JSON format. Use null if a value cannot be found:
+Extract and return these values in JSON format. Use null if not found. Look carefully for YTD (year-to-date) values:
 {{
     "current_gross_pay": <number or null>,
     "current_federal_tax_withheld": <number or null>,
@@ -1386,160 +1219,206 @@ Please extract and return the following values in JSON format. Use null if a val
     "ytd_social_security_tax": <number or null>,
     "ytd_medicare_tax": <number or null>,
     "ytd_401k_contribution": <number or null>,
-    "ytd_net_pay": <number or null>,
     "pay_frequency": "<weekly/biweekly/semimonthly/monthly or null>",
-    "pay_period_number": <number or null>
+    "pay_period_number": <number or null>,
+    "employer_name": "<string or null>"
 }}
 
-Return ONLY the JSON object, no other text."""
+IMPORTANT: Look for labels like "Federal Tax", "Fed Tax", "FIT", "Fed W/H", "Federal Withholding" for federal tax amounts.
+Look for "YTD", "Year to Date", "Y-T-D" prefixes for year-to-date amounts.
+Return ONLY valid JSON, no other text."""
 
-                    try:
-                        response = ai_client.client.chat.completions.create(
-                            model=ai_client.model,
-                            messages=[
-                                {"role": "system", "content": "You are a financial document parser. Extract financial data accurately and return valid JSON only."},
-                                {"role": "user", "content": extraction_prompt}
-                            ]
-                        )
-                        
-                        ai_response = response.choices[0].message.content.strip()
-                        
-                        # Try to parse JSON from response
-                        # Handle potential markdown code blocks
-                        if "```json" in ai_response:
-                            ai_response = ai_response.split("```json")[1].split("```")[0]
-                        elif "```" in ai_response:
-                            ai_response = ai_response.split("```")[1].split("```")[0]
-                        
-                        import json as json_module
-                        ai_data = json_module.loads(ai_response)
-                        
-                        # Update detected_data with AI results
-                        if ai_data.get("current_gross_pay"): detected_data["Current Gross Pay"] = ai_data["current_gross_pay"]
-                        if ai_data.get("current_federal_tax_withheld"): detected_data["Current Federal Tax"] = ai_data["current_federal_tax_withheld"]
-                        if ai_data.get("current_state_tax_withheld"): detected_data["Current State Tax"] = ai_data["current_state_tax_withheld"]
-                        if ai_data.get("current_social_security_tax"): detected_data["Current SS Tax"] = ai_data["current_social_security_tax"]
-                        if ai_data.get("current_medicare_tax"): detected_data["Current Medicare Tax"] = ai_data["current_medicare_tax"]
-                        if ai_data.get("current_401k_contribution"): detected_data["Current 401(k)"] = ai_data["current_401k_contribution"]
-                        if ai_data.get("current_net_pay"): detected_data["Current Net Pay"] = ai_data["current_net_pay"]
-                        if ai_data.get("ytd_gross_pay"): detected_data["YTD Gross"] = ai_data["ytd_gross_pay"]
-                        if ai_data.get("ytd_federal_tax_withheld"): detected_data["YTD Federal Tax"] = ai_data["ytd_federal_tax_withheld"]
-                        if ai_data.get("ytd_state_tax_withheld"): detected_data["YTD State Tax"] = ai_data["ytd_state_tax_withheld"]
-                        if ai_data.get("ytd_social_security_tax"): detected_data["YTD SS Tax"] = ai_data["ytd_social_security_tax"]
-                        if ai_data.get("ytd_medicare_tax"): detected_data["YTD Medicare Tax"] = ai_data["ytd_medicare_tax"]
-                        if ai_data.get("ytd_401k_contribution"): detected_data["YTD 401(k)"] = ai_data["ytd_401k_contribution"]
-                        
-                        # Store pay info in session state
-                        if ai_data.get("pay_frequency"):
-                            st.session_state['detected_pay_frequency'] = ai_data["pay_frequency"]
-                        if ai_data.get("pay_period_number"):
-                            st.session_state['detected_pay_period'] = ai_data["pay_period_number"]
-                        
-                        st.success("✅ AI extraction complete!")
-                        
-                    except Exception as e:
-                        st.error(f"AI extraction error: {e}")
-                        st.info("Falling back to pattern matching results")
+                try:
+                    response = ai_client.client.chat.completions.create(
+                        model=ai_client.model,
+                        messages=[
+                            {"role": "system", "content": "You are an expert financial document parser. Extract data accurately and return valid JSON only."},
+                            {"role": "user", "content": extraction_prompt}
+                        ]
+                    )
+                    
+                    ai_response = response.choices[0].message.content.strip()
+                    
+                    # Clean up response
+                    if "```json" in ai_response:
+                        ai_response = ai_response.split("```json")[1].split("```")[0]
+                    elif "```" in ai_response:
+                        ai_response = ai_response.split("```")[1].split("```")[0]
+                    
+                    import json as json_module
+                    ai_data = json_module.loads(ai_response)
+                    
+                    # Map AI results to detected_data
+                    if ai_data.get("current_gross_pay"): detected_data["Current Gross Pay"] = ai_data["current_gross_pay"]
+                    if ai_data.get("current_federal_tax_withheld"): detected_data["Current Federal Tax"] = ai_data["current_federal_tax_withheld"]
+                    if ai_data.get("current_state_tax_withheld"): detected_data["Current State Tax"] = ai_data["current_state_tax_withheld"]
+                    if ai_data.get("current_social_security_tax"): detected_data["Current SS Tax"] = ai_data["current_social_security_tax"]
+                    if ai_data.get("current_medicare_tax"): detected_data["Current Medicare Tax"] = ai_data["current_medicare_tax"]
+                    if ai_data.get("current_401k_contribution"): detected_data["Current 401(k)"] = ai_data["current_401k_contribution"]
+                    if ai_data.get("current_net_pay"): detected_data["Current Net Pay"] = ai_data["current_net_pay"]
+                    if ai_data.get("ytd_gross_pay"): detected_data["YTD Gross"] = ai_data["ytd_gross_pay"]
+                    if ai_data.get("ytd_federal_tax_withheld"): detected_data["YTD Federal Tax"] = ai_data["ytd_federal_tax_withheld"]
+                    if ai_data.get("ytd_state_tax_withheld"): detected_data["YTD State Tax"] = ai_data["ytd_state_tax_withheld"]
+                    if ai_data.get("ytd_social_security_tax"): detected_data["YTD SS Tax"] = ai_data["ytd_social_security_tax"]
+                    if ai_data.get("ytd_medicare_tax"): detected_data["YTD Medicare Tax"] = ai_data["ytd_medicare_tax"]
+                    if ai_data.get("ytd_401k_contribution"): detected_data["YTD 401(k)"] = ai_data["ytd_401k_contribution"]
+                    
+                    # Store extracted metadata
+                    if ai_data.get("pay_frequency"):
+                        st.session_state['detected_pay_frequency'] = ai_data["pay_frequency"]
+                    if ai_data.get("pay_period_number"):
+                        st.session_state['detected_pay_period'] = ai_data["pay_period_number"]
+                    if ai_data.get("employer_name"):
+                        st.session_state['detected_employer'] = ai_data["employer_name"]
+                    
+                except Exception as e:
+                    st.warning(f"AI extraction encountered an issue: {e}. Falling back to pattern matching.")
+                    use_ai_extraction = False  # Fall back to pattern matching
             
-            # Display all detected data
-            if detected_data:
-                st.markdown("**Extracted Values:**")
+            # Pattern matching (fallback or primary if AI not used)
+            if not use_ai_extraction or not detected_data:
+                status.text("Step 4/5: Extracting financial data with pattern matching...")
+                progress.progress(80)
                 
-                # Organize into current and YTD
-                current_items = {k: v for k, v in detected_data.items() if "Current" in k or "YTD" not in k}
+                import re
+                
+                def find_amount_near_keyword(text, keywords, search_range=100):
+                    text_lower = text.lower()
+                    for keyword in keywords:
+                        pos = text_lower.find(keyword.lower())
+                        if pos != -1:
+                            start = max(0, pos - 20)
+                            end = min(len(text), pos + search_range)
+                            snippet = text[start:end]
+                            amounts = re.findall(r'\$?\s*([\d,]+\.?\d{0,2})', snippet)
+                            for amt in amounts:
+                                try:
+                                    value = float(amt.replace(",", ""))
+                                    if value > 0:
+                                        return value
+                                except:
+                                    pass
+                    return None
+                
+                # Keyword lists
+                gross_kw = ["gross pay", "gross earnings", "gross income", "total gross", "gross wages", "total earnings"]
+                ytd_gross_kw = ["ytd gross", "ytd earnings", "ytd total", "year to date gross", "ytd wages", "gross ytd"]
+                fed_kw = ["federal tax", "fed tax", "federal w/h", "fed w/h", "federal withholding", "fit", "fed inc tax", "federal withheld"]
+                ytd_fed_kw = ["ytd federal", "ytd fed", "federal ytd", "fed ytd", "ytd fit", "ytd fed tax"]
+                ret_kw = ["401k", "401(k)", "retirement", "403b", "def comp", "deferred"]
+                ytd_ret_kw = ["ytd 401k", "ytd 401(k)", "401k ytd", "ytd retirement"]
+                
+                if redacted_text:
+                    v = find_amount_near_keyword(redacted_text, gross_kw)
+                    if v: detected_data["Current Gross Pay"] = v
+                    v = find_amount_near_keyword(redacted_text, ytd_gross_kw)
+                    if v: detected_data["YTD Gross"] = v
+                    v = find_amount_near_keyword(redacted_text, fed_kw)
+                    if v: detected_data["Current Federal Tax"] = v
+                    v = find_amount_near_keyword(redacted_text, ytd_fed_kw)
+                    if v: detected_data["YTD Federal Tax"] = v
+                    v = find_amount_near_keyword(redacted_text, ret_kw)
+                    if v: detected_data["Current 401(k)"] = v
+                    v = find_amount_near_keyword(redacted_text, ytd_ret_kw)
+                    if v: detected_data["YTD 401(k)"] = v
+            
+            # Step 5: Complete
+            status.text("Step 5/5: Extraction complete!")
+            progress.progress(100)
+            time.sleep(0.3)
+            
+            progress.empty()
+            status.empty()
+            
+            # Show privacy confirmation
+            if pii_count > 0:
+                st.success(f"🛡️ **Privacy Protected**: Removed {pii_count} personal information items")
+                with st.expander("View PII types removed"):
+                    for pii_type in pii_types:
+                        st.markdown(f"- 🚫 {pii_type}")
+            
+            # Display results
+            st.markdown("---")
+            st.markdown("### 📊 Extraction Results")
+            
+            if use_ai_extraction and OPENAI_CLIENT_AVAILABLE:
+                st.info("🤖 **Extracted using AI (GPT-5.1)**")
+            else:
+                st.info("📝 **Extracted using pattern matching**")
+            
+            # Show document preview
+            with st.expander("📄 View Document Text (Redacted)", expanded=False):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**Original (contains PII)**")
+                    st.text_area("Original", value=extracted_text[:1000] if extracted_text else "No text", height=150, disabled=True, key="orig_preview", label_visibility="collapsed")
+                with col2:
+                    st.markdown("**After PII Removal (Safe)**")
+                    st.text_area("Redacted", value=redacted_text[:1000] if redacted_text else "No text", height=150, disabled=True, key="redact_preview", label_visibility="collapsed")
+            
+            # Display detected data
+            if detected_data:
+                st.markdown("**💰 Detected Financial Information:**")
+                
+                current_items = {k: v for k, v in detected_data.items() if "Current" in k}
                 ytd_items = {k: v for k, v in detected_data.items() if "YTD" in k}
                 
-                col_curr, col_ytd = st.columns(2)
+                col_c, col_y = st.columns(2)
                 
-                with col_curr:
-                    st.markdown("**Current Period:**")
-                    for label, value in current_items.items():
-                        st.markdown(f"- {label}: **{fmt_currency(value)}**")
+                with col_c:
+                    if current_items:
+                        st.markdown("**Current Period:**")
+                        for label, value in current_items.items():
+                            st.markdown(f"- {label}: **{fmt_currency(value)}**")
                 
-                with col_ytd:
-                    st.markdown("**Year-to-Date:**")
-                    for label, value in ytd_items.items():
-                        st.markdown(f"- {label}: **{fmt_currency(value)}**")
-                
-                # Show large amounts found (for debugging)
-                if large_amounts and not detected_data:
-                    with st.expander("💡 All dollar amounts found in document"):
-                        st.write(sorted(set(large_amounts), reverse=True)[:20])
+                with col_y:
+                    if ytd_items:
+                        st.markdown("**Year-to-Date:**")
+                        for label, value in ytd_items.items():
+                            st.markdown(f"- {label}: **{fmt_currency(value)}**")
                 
                 st.markdown("---")
-                
-                # Option to add as income source
                 st.markdown("### ➕ Add to Income Sources")
-                st.markdown("*Review and adjust the values below, then click Add*")
+                st.markdown("*Review and adjust values, then click Add. This will be combined with any existing income sources.*")
                 
                 add_col1, add_col2 = st.columns(2)
                 
                 with add_col1:
-                    # Prefer YTD values, fall back to current values
-                    auto_income = detected_data.get("YTD Gross", 
-                                    detected_data.get("Current Gross Pay", 0))
-                    auto_withheld = detected_data.get("YTD Federal Tax", 
-                                      detected_data.get("Current Federal Tax", 0))
-                    auto_401k = detected_data.get("YTD 401(k)", 
-                                  detected_data.get("Current 401(k)", 0))
+                    auto_income = detected_data.get("YTD Gross", detected_data.get("Current Gross Pay", 0))
+                    auto_withheld = detected_data.get("YTD Federal Tax", detected_data.get("Current Federal Tax", 0))
+                    auto_401k = detected_data.get("YTD 401(k)", detected_data.get("Current 401(k)", 0))
                     
-                    final_income = st.number_input(
-                        "YTD Gross Income", 
-                        value=float(auto_income), 
-                        key="auto_ytd_income", 
-                        format="%.2f",
-                        help="Total gross income year-to-date"
-                    )
-                    final_withheld = st.number_input(
-                        "YTD Federal Tax Withheld", 
-                        value=float(auto_withheld), 
-                        key="auto_ytd_withheld", 
-                        format="%.2f",
-                        help="Total federal tax withheld year-to-date"
-                    )
-                    final_401k = st.number_input(
-                        "YTD 401(k) Contributions", 
-                        value=float(auto_401k), 
-                        key="auto_ytd_401k", 
-                        format="%.2f",
-                        help="Total 401(k) contributions year-to-date"
-                    )
+                    final_income = st.number_input("YTD Gross Income", value=float(auto_income), key="auto_ytd_income", format="%.2f")
+                    final_withheld = st.number_input("YTD Federal Tax Withheld", value=float(auto_withheld), key="auto_ytd_withheld", format="%.2f")
+                    final_401k = st.number_input("YTD 401(k) Contributions", value=float(auto_401k), key="auto_ytd_401k", format="%.2f")
                 
                 with add_col2:
-                    source_name = st.text_input(
-                        "Employer/Source Name", 
-                        value="[From uploaded document]", 
-                        key="auto_source_name"
-                    )
+                    default_employer = st.session_state.get('detected_employer', '[From uploaded document]')
+                    source_name = st.text_input("Employer/Source Name", value=default_employer, key="auto_source_name")
                     
-                    # Pay frequency
                     freq_options = ["biweekly", "weekly", "semimonthly", "monthly"]
                     default_freq = st.session_state.get('detected_pay_frequency', 'biweekly')
                     if default_freq not in freq_options:
                         default_freq = 'biweekly'
                     
-                    pay_freq = st.selectbox(
-                        "Pay Frequency",
-                        options=freq_options,
-                        index=freq_options.index(default_freq),
-                        format_func=lambda x: x.title(),
-                        key="auto_pay_freq"
-                    )
+                    pay_freq = st.selectbox("Pay Frequency", options=freq_options, index=freq_options.index(default_freq), format_func=lambda x: x.title(), key="auto_pay_freq")
                     
-                    # Current pay period
                     default_period = st.session_state.get('detected_pay_period', 22)
-                    current_period = st.number_input(
-                        "Current Pay Period #",
-                        min_value=1,
-                        max_value=52,
-                        value=int(default_period) if default_period else 22,
-                        key="auto_pay_period"
-                    )
+                    current_period = st.number_input("Current Pay Period #", min_value=1, max_value=52, value=int(default_period) if default_period else 22, key="auto_pay_period")
                     
-                    if st.button("➕ Add as Income Source", type="primary", key="auto_add_source"):
-                        # Create income source from extracted data
+                    # Determine source type based on document type
+                    if "W-2" in doc_type or "Pay Stub" in doc_type:
+                        source_type = IncomeSourceType.W2_PRIMARY
+                    elif "1099-NEC" in doc_type:
+                        source_type = IncomeSourceType.FORM_1099_NEC
+                    elif "1099" in doc_type:
+                        source_type = IncomeSourceType.FORM_1099_NEC
+                    else:
+                        source_type = IncomeSourceType.W2_PRIMARY
+                    
+                    if st.button("➕ Add Income Source", type="primary", key="auto_add_source", use_container_width=True):
                         new_source = IncomeSource(
-                            source_type=IncomeSourceType.W2_PRIMARY if "W-2" in doc_type else IncomeSourceType.FORM_1099_NEC,
+                            source_type=source_type,
                             name=source_name,
                             pay_frequency=EnhancedPayFrequency(pay_freq),
                             current_pay_period=current_period,
@@ -1549,21 +1428,15 @@ Return ONLY the JSON object, no other text."""
                         )
                         st.session_state.enhanced_profile.add_income_source(new_source)
                         sync_and_calculate()
-                        st.success("✅ Income source added! Check the Income tab.")
+                        st.success(f"✅ Added! Total income sources: {len(st.session_state.enhanced_profile.income_sources)}")
+                        st.balloons()
+                        time.sleep(1)
                         st.rerun()
             else:
                 st.warning("Could not automatically detect financial information.")
-                
-                # Show all amounts found as fallback
-                if large_amounts:
-                    st.markdown("**Dollar amounts found in document:**")
-                    st.write(sorted(set(large_amounts), reverse=True)[:15])
-                    st.info("You can manually enter these values below or in the Income tab.")
-                
-                # Manual entry form
                 st.markdown("### Manual Entry")
-                man_col1, man_col2 = st.columns(2)
                 
+                man_col1, man_col2 = st.columns(2)
                 with man_col1:
                     manual_income = st.number_input("YTD Gross Income", value=0.0, key="manual_income", format="%.2f")
                     manual_withheld = st.number_input("YTD Federal Withheld", value=0.0, key="manual_withheld", format="%.2f")
@@ -1587,9 +1460,39 @@ Return ONLY the JSON object, no other text."""
                             st.success("✅ Added!")
                             st.rerun()
     
-    # Manual entry reminder
+    # Show summary of all income sources
     st.markdown("---")
-    st.info("💡 **Tip:** You can also manually enter income information in the **Income** tab without uploading documents.")
+    st.markdown("### 📋 All Income Sources")
+    
+    all_sources = list(st.session_state.enhanced_profile.income_sources)
+    if st.session_state.enhanced_profile.spouse:
+        all_sources.extend(st.session_state.enhanced_profile.spouse.sources)
+    
+    if all_sources:
+        for i, src in enumerate(all_sources):
+            col1, col2, col3 = st.columns([2, 1, 1])
+            with col1:
+                st.markdown(f"**{i+1}. {src.name}** ({src.source_type.value.replace('_', ' ').title()})")
+            with col2:
+                st.markdown(f"Income: {fmt_currency(src.ytd_gross)}")
+            with col3:
+                st.markdown(f"Withheld: {fmt_currency(src.ytd_federal_withheld)}")
+        
+        st.markdown("---")
+        total_income = sum(s.ytd_gross for s in all_sources)
+        total_withheld = sum(s.ytd_federal_withheld for s in all_sources)
+        total_401k = sum(s.ytd_401k for s in all_sources)
+        
+        st.success(f"""
+        **📊 Totals (All Sources Combined):**
+        - Total YTD Income: **{fmt_currency(total_income)}**
+        - Total Federal Withheld: **{fmt_currency(total_withheld)}**
+        - Total 401(k): **{fmt_currency(total_401k)}**
+        
+        *These totals will be used for AI tax strategy recommendations.*
+        """)
+    else:
+        st.info("No income sources added yet. Upload a document above or use the Income tab to add manually.")
 
 
 # =============================================================================
@@ -1717,6 +1620,37 @@ with tab5:
     st.markdown("### 🤖 AI-Powered Tax Strategies")
     st.markdown("Get personalized tax reduction strategies powered by GPT-5.1 with adaptive reasoning")
     
+    # Show aggregated income summary
+    all_sources = list(st.session_state.enhanced_profile.income_sources)
+    if st.session_state.enhanced_profile.spouse:
+        all_sources.extend(st.session_state.enhanced_profile.spouse.sources)
+    
+    if all_sources:
+        total_income = sum(s.ytd_gross for s in all_sources)
+        total_withheld = sum(s.ytd_federal_withheld for s in all_sources)
+        total_401k = sum(s.ytd_401k for s in all_sources)
+        
+        with st.expander(f"📊 **Data to be analyzed: {len(all_sources)} income source(s) - Total: {fmt_currency(total_income)}**", expanded=True):
+            st.markdown("**Income Sources Being Analyzed:**")
+            for i, src in enumerate(all_sources):
+                st.markdown(f"- **{src.name}**: Income: {fmt_currency(src.ytd_gross)} | Withheld: {fmt_currency(src.ytd_federal_withheld)} | 401(k): {fmt_currency(src.ytd_401k)}")
+            
+            st.markdown("---")
+            st.markdown(f"""
+            **Aggregated Totals (sent to AI):**
+            - 💰 Total YTD Income: **{fmt_currency(total_income)}**
+            - 🏛️ Total Federal Withheld: **{fmt_currency(total_withheld)}**
+            - 🏦 Total 401(k): **{fmt_currency(total_401k)}**
+            - 📊 Projected Annual: **{fmt_currency(result.gross_income)}**
+            - 💵 Current Tax Liability: **{fmt_currency(result.total_tax_liability)}**
+            - 📈 Effective Tax Rate: **{result.effective_rate:.1f}%**
+            """)
+            st.info("🛡️ Only these financial numbers are sent to AI - NO personal information (SSN, names, addresses) is ever transmitted.")
+    else:
+        st.warning("⚠️ No income sources added yet. Please add income sources in the **Income** tab or **Upload Forms** tab first.")
+    
+    st.markdown("---")
+    
     # AI Status
     ai_client = get_ai_client()
     
@@ -1739,7 +1673,8 @@ with tab5:
             "🚀 Generate AI Tax Strategies",
             type="primary",
             use_container_width=True,
-            key="generate_ai_strategies"
+            key="generate_ai_strategies",
+            disabled=not all_sources  # Disable if no income sources
         )
     
     if generate_btn:
@@ -1770,8 +1705,9 @@ with tab5:
         show_pii_pipeline(pipeline_placeholder, 1, pipeline_steps)
         time.sleep(0.7)
         
-        # Actually anonymize the data
-        anonymized_profile = create_anonymized_profile(profile)
+        # Actually anonymize the data (pass number of income sources for context)
+        num_sources = len(all_sources) if all_sources else 1
+        anonymized_profile = create_anonymized_profile(profile, num_income_sources=num_sources)
         anonymized_result = create_anonymized_tax_result(result)
         
         pii_removed = [

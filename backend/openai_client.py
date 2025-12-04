@@ -244,12 +244,15 @@ Provide:
         if focus_areas:
             focus_text = f"\n\nFOCUS AREAS (prioritize these): {', '.join(focus_areas)}"
         
+        num_sources = profile.get('num_income_sources', 1)
+        sources_note = f"(aggregated from {num_sources} income source(s))" if num_sources > 1 else ""
+        
         return f"""
-ANONYMIZED FINANCIAL PROFILE:
+ANONYMIZED FINANCIAL PROFILE {sources_note}:
 {json.dumps(profile, indent=2)}
 
-CURRENT TAX CALCULATION:
-- Gross Income: ${tax_result.get('gross_income', 0):,.2f}
+CURRENT TAX CALCULATION (based on all income sources combined):
+- Total Gross Income: ${tax_result.get('gross_income', 0):,.2f}
 - Taxable Income: ${tax_result.get('taxable_income', 0):,.2f}
 - Federal Tax: ${tax_result.get('federal_tax', 0):,.2f}
 - Total Tax Liability: ${tax_result.get('total_tax_liability', 0):,.2f}
@@ -259,6 +262,7 @@ CURRENT TAX CALCULATION:
 {focus_text}
 
 Based on this financial profile, provide personalized tax reduction strategies. 
+Note: Income and withholding amounts represent TOTALS from all the taxpayer's income sources combined.
 Prioritize by potential savings. Include specific dollar amounts where possible.
 Focus on strategies that can be implemented before year-end if applicable.
 """
@@ -401,23 +405,31 @@ def get_ai_client() -> TaxAIClient:
     return st.session_state.ai_client
 
 
-def create_anonymized_profile(profile) -> Dict[str, Any]:
+def create_anonymized_profile(profile, num_income_sources: int = 1) -> Dict[str, Any]:
     """
     Create an anonymized version of the user profile for AI processing.
     
     This removes all PII and keeps only financial data needed for tax analysis.
+    All income from multiple sources is already aggregated in the profile.
     """
     return {
         "filing_status": profile.filing_status.value if hasattr(profile.filing_status, 'value') else str(profile.filing_status),
         "age_bracket": "under_50" if profile.age < 50 else "50_to_65" if profile.age < 65 else "65_plus",
         "num_dependents": profile.num_children_under_17,
+        "num_income_sources": num_income_sources,  # Number of W-2s, 1099s, etc. combined
         "income": {
+            "total_ytd_income": getattr(profile, 'ytd_income', 0),
             "projected_annual_income": getattr(profile, 'projected_annual_income', profile.ytd_income * 2),
             "self_employment_income": getattr(profile, 'self_employment_income', 0),
             "interest_income": getattr(profile, 'interest_income', 0),
             "dividend_income": getattr(profile, 'dividend_income', 0),
             "capital_gains_short": getattr(profile, 'capital_gains_short', 0),
             "capital_gains_long": getattr(profile, 'capital_gains_long', 0),
+        },
+        "withholding": {
+            "total_federal_withheld": getattr(profile, 'ytd_federal_withheld', 0),
+            "projected_federal_withheld": getattr(profile, 'projected_annual_withholding', 0),
+            "estimated_payments": getattr(profile, 'estimated_payments_made', 0),
         },
         "retirement_contributions": {
             "ytd_401k": getattr(profile, 'ytd_401k_traditional', 0),
@@ -443,10 +455,6 @@ def create_anonymized_profile(profile) -> Dict[str, Any]:
             "interested_in_solar": getattr(profile, 'interested_in_solar', False),
             "interested_in_ev": getattr(profile, 'interested_in_ev', False),
         },
-        "withholding": {
-            "projected_federal_withheld": getattr(profile, 'projected_annual_withholding', 0),
-            "estimated_payments": getattr(profile, 'estimated_payments_made', 0),
-        }
     }
 
 

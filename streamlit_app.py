@@ -21,8 +21,5 @@ _backend_path = os.path.join(_this_dir, "backend")
 if _backend_path not in sys.path:
     sys.path.insert(0, _backend_path)
 
-# Change working directory to backend
-os.chdir(_backend_path)
-
-# Now import and run the app
+# Import and run the app (executes all streamlit code)
 import app

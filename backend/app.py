@@ -20,21 +20,9 @@ import os
 _current_file = os.path.abspath(__file__)
 _backend_dir = os.path.dirname(_current_file)
 
-# Print debug info
-print(f"[TaxGuard] Current file: {_current_file}")
-print(f"[TaxGuard] Backend dir: {_backend_dir}")
-print(f"[TaxGuard] sys.path before: {sys.path[:3]}...")
-
-# Add backend directory to path (at the front)
+# Add backend directory to path (at the front) - but DON'T change working directory
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
-
-# Also set working directory
-os.chdir(_backend_dir)
-
-print(f"[TaxGuard] sys.path after: {sys.path[:3]}...")
-print(f"[TaxGuard] CWD: {os.getcwd()}")
-print(f"[TaxGuard] Files in backend: {os.listdir(_backend_dir)[:5]}...")
 
 import streamlit as st
 import pandas as pd
@@ -832,9 +820,10 @@ st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
 # TABS
 # =============================================================================
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 Summary", 
     "💼 Income", 
+    "📄 Upload Forms",
     "🔮 What-If", 
     "🤖 AI Strategies",
     "💡 Recommendations",
@@ -1051,10 +1040,262 @@ with tab2:
 
 
 # =============================================================================
-# TAB 3: WHAT-IF SIMULATOR
+# TAB 3: UPLOAD TAX FORMS
 # =============================================================================
 
 with tab3:
+    st.markdown("### 📄 Upload Tax Documents")
+    st.markdown("""
+        Upload your W-2, 1099, or other tax forms. TaxGuard AI will:
+        1. **Extract** income and withholding information using OCR
+        2. **Remove** all personal information (SSN, names, addresses) before processing
+        3. **Auto-fill** your income sources based on the extracted data
+    """)
+    
+    st.markdown("---")
+    
+    # Document type selector
+    doc_type = st.selectbox(
+        "Document Type",
+        options=[
+            "W-2 (Wage and Tax Statement)",
+            "1099-NEC (Nonemployee Compensation)",
+            "1099-MISC (Miscellaneous Income)",
+            "1099-INT (Interest Income)",
+            "1099-DIV (Dividends)",
+            "1099-B (Broker Transactions)",
+            "1040 (Tax Return - Prior Year)",
+            "Pay Stub",
+            "Other Tax Document"
+        ],
+        key="upload_doc_type"
+    )
+    
+    # File uploader
+    uploaded_file = st.file_uploader(
+        "Upload your document (PDF or Image)",
+        type=["pdf", "png", "jpg", "jpeg"],
+        help="Supported formats: PDF, PNG, JPG. Max size: 10MB",
+        key="tax_doc_uploader"
+    )
+    
+    if uploaded_file is not None:
+        st.success(f"✅ Uploaded: {uploaded_file.name} ({uploaded_file.size / 1024:.1f} KB)")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            process_btn = st.button(
+                "🔍 Process Document",
+                type="primary",
+                use_container_width=True,
+                key="process_doc_btn"
+            )
+        
+        with col2:
+            st.markdown("")  # Spacer
+        
+        if process_btn:
+            # Show privacy pipeline
+            st.info("🛡️ **Privacy Protection Active** - Personal information will be removed before processing")
+            
+            progress = st.progress(0)
+            status = st.empty()
+            
+            # Step 1: Read document
+            status.text("Step 1/4: Reading document...")
+            progress.progress(25)
+            time.sleep(0.5)
+            
+            # Step 2: OCR (if image/PDF)
+            status.text("Step 2/4: Extracting text with OCR...")
+            progress.progress(50)
+            
+            # Read file content
+            file_content = uploaded_file.read()
+            extracted_text = ""
+            
+            try:
+                if uploaded_file.type == "application/pdf":
+                    # Try pdfplumber for PDF
+                    try:
+                        import pdfplumber
+                        import io
+                        with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+                            for page in pdf.pages:
+                                extracted_text += page.extract_text() or ""
+                    except ImportError:
+                        st.warning("PDF processing requires pdfplumber. Using fallback.")
+                        extracted_text = "[PDF content - install pdfplumber for extraction]"
+                else:
+                    # Image - use pytesseract
+                    try:
+                        from PIL import Image
+                        import pytesseract
+                        import io
+                        image = Image.open(io.BytesIO(file_content))
+                        extracted_text = pytesseract.image_to_string(image)
+                    except ImportError:
+                        st.warning("Image OCR requires pytesseract. Using fallback.")
+                        extracted_text = "[Image content - install pytesseract for extraction]"
+                    except Exception as e:
+                        st.warning(f"OCR processing error: {e}")
+                        extracted_text = "[Could not extract text from image]"
+            except Exception as e:
+                st.error(f"Error reading document: {e}")
+                extracted_text = ""
+            
+            time.sleep(0.5)
+            
+            # Step 3: PII Redaction
+            status.text("Step 3/4: Removing personal information (SSN, names, addresses)...")
+            progress.progress(75)
+            
+            if extracted_text:
+                redactor = PIIRedactor(use_ner=False)
+                redaction_result = redactor.redact_sensitive_data(extracted_text)
+                redacted_text = redaction_result.redacted_text
+                pii_count = redaction_result.redaction_count
+                pii_types = redaction_result.pii_types_found
+            else:
+                redacted_text = ""
+                pii_count = 0
+                pii_types = []
+            
+            time.sleep(0.5)
+            
+            # Step 4: Extract financial data
+            status.text("Step 4/4: Extracting financial information...")
+            progress.progress(100)
+            time.sleep(0.3)
+            
+            # Clear progress
+            progress.empty()
+            status.empty()
+            
+            # Show results
+            st.markdown("---")
+            st.markdown("### 📊 Extraction Results")
+            
+            # Privacy confirmation
+            if pii_count > 0:
+                st.success(f"🛡️ **Privacy Protected**: Removed {pii_count} personal information items")
+                with st.expander("View PII types removed"):
+                    for pii_type in pii_types:
+                        st.markdown(f"- 🚫 {pii_type}")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Original Document (Preview)**")
+                # Show first 500 chars of original with PII warning
+                if extracted_text:
+                    preview = extracted_text[:500] + ("..." if len(extracted_text) > 500 else "")
+                    st.text_area(
+                        "Contains PII - DO NOT SHARE",
+                        value=preview,
+                        height=200,
+                        disabled=True,
+                        key="original_preview"
+                    )
+                else:
+                    st.warning("Could not extract text from document")
+            
+            with col2:
+                st.markdown("**After PII Removal (Safe)**")
+                if redacted_text:
+                    preview = redacted_text[:500] + ("..." if len(redacted_text) > 500 else "")
+                    st.text_area(
+                        "PII Removed - Safe to process",
+                        value=preview,
+                        height=200,
+                        disabled=True,
+                        key="redacted_preview"
+                    )
+                else:
+                    st.info("No text to display")
+            
+            # Parse extracted data based on document type
+            st.markdown("---")
+            st.markdown("### 💰 Detected Financial Information")
+            
+            # Simple pattern matching for common fields
+            import re
+            
+            detected_data = {}
+            
+            # Look for wage patterns
+            wage_patterns = [
+                (r"Wages.*?[\$]?([\d,]+\.?\d*)", "Wages/Salary"),
+                (r"Federal.*?withheld.*?[\$]?([\d,]+\.?\d*)", "Federal Withheld"),
+                (r"Social security wages.*?[\$]?([\d,]+\.?\d*)", "SS Wages"),
+                (r"Medicare wages.*?[\$]?([\d,]+\.?\d*)", "Medicare Wages"),
+                (r"Gross pay.*?[\$]?([\d,]+\.?\d*)", "Gross Pay"),
+                (r"YTD.*?gross.*?[\$]?([\d,]+\.?\d*)", "YTD Gross"),
+                (r"YTD.*?federal.*?[\$]?([\d,]+\.?\d*)", "YTD Federal"),
+                (r"401.*?[\$]?([\d,]+\.?\d*)", "401(k) Contribution"),
+            ]
+            
+            for pattern, label in wage_patterns:
+                match = re.search(pattern, redacted_text, re.IGNORECASE)
+                if match:
+                    try:
+                        value = float(match.group(1).replace(",", ""))
+                        detected_data[label] = value
+                    except:
+                        pass
+            
+            if detected_data:
+                for label, value in detected_data.items():
+                    st.markdown(f"- **{label}:** {fmt_currency(value)}")
+                
+                st.markdown("---")
+                
+                # Option to add as income source
+                st.markdown("### ➕ Add to Income Sources")
+                
+                add_col1, add_col2 = st.columns(2)
+                
+                with add_col1:
+                    auto_income = detected_data.get("YTD Gross", detected_data.get("Wages/Salary", detected_data.get("Gross Pay", 0)))
+                    auto_withheld = detected_data.get("YTD Federal", detected_data.get("Federal Withheld", 0))
+                    auto_401k = detected_data.get("401(k) Contribution", 0)
+                    
+                    st.number_input("YTD Income", value=float(auto_income), key="auto_ytd_income", format="%.2f")
+                    st.number_input("YTD Federal Withheld", value=float(auto_withheld), key="auto_ytd_withheld", format="%.2f")
+                    st.number_input("YTD 401(k)", value=float(auto_401k), key="auto_ytd_401k", format="%.2f")
+                
+                with add_col2:
+                    source_name = st.text_input("Source Name", value="[From uploaded document]", key="auto_source_name")
+                    
+                    if st.button("➕ Add as Income Source", type="primary", key="auto_add_source"):
+                        # Create income source from extracted data
+                        new_source = IncomeSource(
+                            source_type=IncomeSourceType.W2_PRIMARY if "W-2" in doc_type else IncomeSourceType.FORM_1099_NEC,
+                            name=source_name,
+                            pay_frequency=EnhancedPayFrequency.BIWEEKLY,
+                            current_pay_period=22,
+                            ytd_gross=st.session_state.auto_ytd_income,
+                            ytd_federal_withheld=st.session_state.auto_ytd_withheld,
+                            ytd_401k=st.session_state.auto_ytd_401k,
+                        )
+                        st.session_state.enhanced_profile.add_income_source(new_source)
+                        sync_and_calculate()
+                        st.success("✅ Income source added! Check the Income tab.")
+                        st.rerun()
+            else:
+                st.warning("Could not automatically detect financial information. You can manually enter the data in the Income tab.")
+    
+    # Manual entry reminder
+    st.markdown("---")
+    st.info("💡 **Tip:** You can also manually enter income information in the **Income** tab without uploading documents.")
+
+
+# =============================================================================
+# TAB 4: WHAT-IF SIMULATOR
+# =============================================================================
+
+with tab4:
     st.markdown("### 🔮 What-If Tax Simulator")
     st.markdown("See how different scenarios could affect your tax outcome")
     
@@ -1168,10 +1409,10 @@ with tab3:
 
 
 # =============================================================================
-# TAB 4: AI STRATEGIES
+# TAB 5: AI STRATEGIES
 # =============================================================================
 
-with tab4:
+with tab5:
     st.markdown("### 🤖 AI-Powered Tax Strategies")
     st.markdown("Get personalized tax reduction strategies powered by GPT-5.1 with adaptive reasoning")
     
@@ -1360,10 +1601,10 @@ with tab4:
 
 
 # =============================================================================
-# TAB 5: RECOMMENDATIONS
+# TAB 6: RECOMMENDATIONS
 # =============================================================================
 
-with tab5:
+with tab6:
     recs = st.session_state.recommendations
     
     if recs:
@@ -1416,10 +1657,10 @@ with tab5:
 
 
 # =============================================================================
-# TAB 6: PRIVACY
+# TAB 7: PRIVACY
 # =============================================================================
 
-with tab6:
+with tab7:
     st.markdown("### 🔒 Privacy Air Gap Technology")
     st.markdown("""
         TaxGuard AI uses a "Privacy Air Gap" to ensure your personal information 

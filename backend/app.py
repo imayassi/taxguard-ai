@@ -7,17 +7,26 @@ Features:
 - Multiple income source tracking (spouse, multiple jobs, 1099s)
 - Real-time refund/owed calculation
 - What-if simulations
-- AI-powered recommendations
-- PII protection (privacy air gap)
+- AI-powered recommendations (OpenAI GPT-5.1)
+- Transparent PII protection (privacy air gap)
 
 Run with: streamlit run app.py
 """
+
+import sys
+from pathlib import Path
+
+# Add the backend directory to path for imports (needed for Streamlit Cloud)
+backend_dir = Path(__file__).parent.resolve()
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
 
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime
 from typing import Optional, List, Dict, Any
 import time
+import json
 
 # Import backend modules
 from tax_constants import (
@@ -32,6 +41,10 @@ from enhanced_models import (
 from pii_redaction import PIIRedactor
 from tax_simulator import TaxCalculator, TaxSimulator, RecommendationEngine
 from advanced_strategies import get_all_strategies, StrategyCategory
+from openai_client import (
+    TaxAIClient, get_ai_client, create_anonymized_profile, 
+    create_anonymized_tax_result, AIProvider
+)
 
 
 # =============================================================================
@@ -65,6 +78,7 @@ st.markdown("""
         --accent-green-light: #E8F7F0;
         --warning-red: #D52B1E;
         --warning-red-light: #FDEEEC;
+        --warning-orange: #F5A623;
         --text-dark: #1A1A1A;
         --text-medium: #4A4A4A;
         --text-light: #6B6B6B;
@@ -263,17 +277,6 @@ st.markdown("""
         transform: translateY(0);
     }
     
-    /* Secondary Button */
-    .secondary-btn > button {
-        background: transparent !important;
-        color: var(--primary-blue) !important;
-        border: 2px solid var(--primary-blue) !important;
-    }
-    
-    .secondary-btn > button:hover {
-        background: var(--primary-blue-light) !important;
-    }
-    
     /* Input Fields */
     .stTextInput > div > div > input,
     .stNumberInput > div > div > input,
@@ -311,119 +314,73 @@ st.markdown("""
         color: white !important;
     }
     
-    /* Expander */
-    .streamlit-expanderHeader {
-        background: var(--bg-card);
-        border-radius: 8px;
-        border: 1px solid var(--border-light);
-        font-weight: 600;
-    }
-    
-    /* Recommendation Cards */
-    .rec-card {
-        background: var(--bg-card);
+    /* Privacy Pipeline */
+    .privacy-pipeline {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
         border-radius: 12px;
         padding: 20px;
-        margin-bottom: 12px;
-        border-left: 4px solid var(--primary-blue);
-        box-shadow: var(--shadow-sm);
-    }
-    
-    .rec-card.high-priority {
-        border-left-color: var(--warning-red);
-    }
-    
-    .rec-card.medium-priority {
-        border-left-color: #F5A623;
-    }
-    
-    .rec-card.low-priority {
-        border-left-color: var(--accent-green);
-    }
-    
-    .rec-title {
-        font-size: 1rem;
-        font-weight: 600;
-        color: var(--text-dark);
-        margin-bottom: 8px;
-    }
-    
-    .rec-savings {
-        font-size: 1.25rem;
-        font-weight: 700;
-        color: var(--accent-green);
-    }
-    
-    /* Divider */
-    hr {
-        border: none;
-        height: 1px;
-        background: var(--border-light);
-        margin: 24px 0;
-    }
-    
-    /* Income Source Card */
-    .income-source {
-        background: var(--bg-card);
-        border-radius: 12px;
-        padding: 20px;
-        margin-bottom: 12px;
-        border: 1px solid var(--border-light);
-        position: relative;
-    }
-    
-    .income-source-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 12px;
-    }
-    
-    .source-type-badge {
-        background: var(--primary-blue-light);
-        color: var(--primary-blue);
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 0.8rem;
-        font-weight: 600;
-    }
-    
-    /* Header Banner */
-    .header-banner {
-        background: linear-gradient(135deg, var(--primary-blue) 0%, var(--secondary-blue) 100%);
-        padding: 24px 32px;
-        border-radius: 16px;
         color: white;
-        margin-bottom: 24px;
+        margin: 16px 0;
     }
     
-    .header-title {
-        font-size: 1.75rem;
-        font-weight: 700;
-        margin-bottom: 8px;
+    .pipeline-step {
+        display: flex;
+        align-items: center;
+        padding: 12px;
+        margin: 8px 0;
+        background: rgba(255,255,255,0.1);
+        border-radius: 8px;
+        transition: all 0.3s ease;
     }
     
-    .header-subtitle {
+    .pipeline-step.active {
+        background: rgba(20, 166, 107, 0.3);
+        border: 1px solid #14A66B;
+    }
+    
+    .pipeline-step.completed {
+        background: rgba(20, 166, 107, 0.2);
+    }
+    
+    .pipeline-step.pending {
+        opacity: 0.5;
+    }
+    
+    .pipeline-icon {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: rgba(255,255,255,0.2);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-right: 12px;
         font-size: 1rem;
-        opacity: 0.9;
     }
     
-    /* Stats Row */
-    .stats-row {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 16px;
-        margin-bottom: 24px;
+    .pipeline-step.completed .pipeline-icon {
+        background: #14A66B;
     }
     
-    /* Animation */
-    @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(10px); }
-        to { opacity: 1; transform: translateY(0); }
+    /* AI Status Badge */
+    .ai-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 500;
     }
     
-    .animate-fade-in {
-        animation: fadeIn 0.4s ease-out;
+    .ai-status.connected {
+        background: #E8F7F0;
+        color: #14A66B;
+    }
+    
+    .ai-status.disconnected {
+        background: #FDEEEC;
+        color: #D52B1E;
     }
     
     /* Privacy Badge */
@@ -443,11 +400,38 @@ st.markdown("""
         font-size: 1.2rem;
     }
     
-    /* Toast/Alert */
+    /* Animation */
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+    
+    .animate-fade-in {
+        animation: fadeIn 0.4s ease-out;
+    }
+    
+    .animate-pulse {
+        animation: pulse 1.5s ease-in-out infinite;
+    }
+    
+    /* Redaction highlight */
+    .redacted {
+        background: #FFE066;
+        padding: 2px 4px;
+        border-radius: 3px;
+        font-family: monospace;
+    }
+    
+    /* Success toast */
     .success-toast {
-        background: var(--accent-green-light);
-        border: 1px solid var(--accent-green);
-        color: var(--accent-green);
+        background: #E8F7F0;
+        border: 1px solid #14A66B;
+        color: #0D5C3D;
         padding: 12px 16px;
         border-radius: 8px;
         display: flex;
@@ -473,6 +457,8 @@ def init_session_state():
         'simulations': [],
         'income_sources': [],
         'show_advanced': False,
+        'ai_strategies': None,
+        'pii_log': [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -555,6 +541,53 @@ def sync_and_calculate():
     st.session_state.recommendations = engine.generate_recommendations(p)
 
 
+def show_pii_pipeline(placeholder, current_step: int, steps: List[Dict], pii_found: List[str] = None):
+    """Display the privacy pipeline progress."""
+    with placeholder.container():
+        html = """
+            <div class="privacy-pipeline">
+                <div style="display: flex; align-items: center; margin-bottom: 16px;">
+                    <span style="font-size: 1.5rem; margin-right: 12px;">🛡️</span>
+                    <div>
+                        <div style="font-weight: 600; font-size: 1.1rem;">Privacy Air Gap Active</div>
+                        <div style="font-size: 0.85rem; opacity: 0.8;">Your personal information is being protected</div>
+                    </div>
+                </div>
+        """
+        
+        for i, step in enumerate(steps):
+            if i < current_step:
+                status = "completed"
+                icon = "✓"
+            elif i == current_step:
+                status = "active"
+                icon = step.get('icon', '⏳')
+            else:
+                status = "pending"
+                icon = step.get('icon', '○')
+            
+            html += f"""
+                <div class="pipeline-step {status}">
+                    <div class="pipeline-icon">{icon}</div>
+                    <div>
+                        <div style="font-weight: 500;">{step['title']}</div>
+                        <div style="font-size: 0.85rem; opacity: 0.8;">{step['description']}</div>
+                    </div>
+                </div>
+            """
+        
+        if pii_found:
+            html += f"""
+                <div style="margin-top: 16px; padding: 12px; background: rgba(213, 43, 30, 0.2); border-radius: 8px;">
+                    <div style="font-weight: 500; margin-bottom: 8px;">🚫 PII Detected & Removed:</div>
+                    <div style="font-size: 0.9rem;">{', '.join(pii_found)}</div>
+                </div>
+            """
+        
+        html += "</div>"
+        st.markdown(html, unsafe_allow_html=True)
+
+
 # =============================================================================
 # SIDEBAR - NAVIGATION & PROFILE
 # =============================================================================
@@ -571,7 +604,22 @@ with st.sidebar:
         </div>
     """, unsafe_allow_html=True)
     
-    st.markdown("<hr style='border-color: rgba(255,255,255,0.1); margin: 0 0 20px 0;'>", unsafe_allow_html=True)
+    # AI Connection Status
+    ai_client = get_ai_client()
+    if ai_client.is_connected:
+        st.markdown("""
+            <div class="ai-status connected">
+                <span>🟢</span> GPT-5.1 Connected
+            </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+            <div class="ai-status disconnected">
+                <span>🔴</span> AI Offline (Add API Key)
+            </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("<hr style='border-color: rgba(255,255,255,0.1); margin: 20px 0;'>", unsafe_allow_html=True)
     
     # Progress Steps
     steps = [
@@ -635,7 +683,7 @@ with st.sidebar:
     st.markdown("""
         <div class="privacy-badge">
             <span class="icon">🔒</span>
-            <span>Your data never leaves your device</span>
+            <span>PII removed before AI processing</span>
         </div>
     """, unsafe_allow_html=True)
 
@@ -646,9 +694,9 @@ with st.sidebar:
 
 # Header
 st.markdown("""
-    <div class="header-banner animate-fade-in">
-        <div class="header-title">Federal Tax Estimation 2025</div>
-        <div class="header-subtitle">Get an accurate estimate of your federal taxes with our smart calculator</div>
+    <div style="background: linear-gradient(135deg, #0077C5 0%, #0097D8 100%); padding: 24px 32px; border-radius: 16px; color: white; margin-bottom: 24px;">
+        <div style="font-size: 1.75rem; font-weight: 700; margin-bottom: 8px;">Federal Tax Estimation 2025</div>
+        <div style="font-size: 1rem; opacity: 0.9;">Get an accurate estimate of your federal taxes with AI-powered optimization</div>
     </div>
 """, unsafe_allow_html=True)
 
@@ -674,7 +722,7 @@ with col2:
             <div class="result-card {card_class} animate-fade-in">
                 <div class="result-label">{label}</div>
                 <div class="result-amount {amount_class}">{fmt_currency(amount)}</div>
-                <div style="color: var(--text-light); font-size: 0.9rem;">
+                <div style="color: #6B6B6B; font-size: 0.9rem;">
                     Based on projected annual income of {fmt_currency(result.gross_income)}
                 </div>
             </div>
@@ -724,10 +772,11 @@ st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
 # TABS
 # =============================================================================
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊 Summary", 
     "💼 Income", 
     "🔮 What-If", 
+    "🤖 AI Strategies",
     "💡 Recommendations",
     "🔒 Privacy"
 ])
@@ -741,11 +790,7 @@ with tab1:
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("""
-            <div class="tax-card">
-                <div class="tax-card-header">📈 Income Breakdown</div>
-            </div>
-        """, unsafe_allow_html=True)
+        st.markdown("### 📈 Income Breakdown")
         
         income_data = {
             "Category": ["Gross Income", "Adjustments", "Adjusted Gross Income", 
@@ -765,11 +810,7 @@ with tab1:
         )
     
     with col2:
-        st.markdown("""
-            <div class="tax-card">
-                <div class="tax-card-header">💰 Tax Breakdown</div>
-            </div>
-        """, unsafe_allow_html=True)
+        st.markdown("### 💰 Tax Breakdown")
         
         tax_data = {
             "Category": ["Federal Income Tax", "Self-Employment Tax", 
@@ -808,14 +849,8 @@ with tab1:
 # =============================================================================
 
 with tab2:
-    st.markdown("""
-        <div class="tax-card">
-            <div class="tax-card-header">💼 Income Sources</div>
-            <p style="color: var(--text-light); margin-bottom: 20px;">
-                Add all income sources for yourself and your spouse (if married filing jointly)
-            </p>
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown("### 💼 Income Sources")
+    st.markdown("Add all income sources for yourself and your spouse (if married filing jointly)")
     
     # Add Income Source Form
     with st.expander("➕ Add New Income Source", expanded=True):
@@ -858,7 +893,7 @@ with tab2:
                 key="new_period"
             )
         
-        st.markdown("<hr>", unsafe_allow_html=True)
+        st.markdown("---")
         
         col1, col2, col3 = st.columns(3)
         
@@ -918,7 +953,7 @@ with tab2:
                 st.warning("Please enter YTD income greater than $0")
     
     # Display Current Income Sources
-    st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
+    st.markdown("")
     
     all_sources = list(st.session_state.enhanced_profile.income_sources)
     if st.session_state.enhanced_profile.spouse:
@@ -932,12 +967,7 @@ with tab2:
             
             with col1:
                 badge_text = source.source_type.value.replace("_", " ").upper()
-                st.markdown(f"""
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <span class="source-type-badge">{badge_text}</span>
-                        <span style="font-weight: 500;">{source.name}</span>
-                    </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"🏢 **{badge_text}** - {source.name}")
             
             with col2:
                 st.markdown(f"**YTD:** {fmt_currency(source.ytd_gross)}")
@@ -948,22 +978,14 @@ with tab2:
             with col4:
                 st.markdown(f"**Projected:** {fmt_currency(source.projected_annual_income)}")
             
-            st.markdown("<hr style='margin: 8px 0; opacity: 0.3;'>", unsafe_allow_html=True)
+            st.markdown("---")
         
         # Totals
         total_ytd = sum(s.ytd_gross for s in all_sources)
         total_withheld = sum(s.ytd_federal_withheld for s in all_sources)
         total_projected = sum(s.projected_annual_income for s in all_sources)
         
-        st.markdown(f"""
-            <div style="background: var(--primary-blue-light); padding: 16px; border-radius: 8px; margin-top: 16px;">
-                <div style="display: flex; justify-content: space-between;">
-                    <div><strong>Total YTD Income:</strong> {fmt_currency(total_ytd)}</div>
-                    <div><strong>Total Withheld:</strong> {fmt_currency(total_withheld)}</div>
-                    <div><strong>Projected Annual:</strong> {fmt_currency(total_projected)}</div>
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
+        st.info(f"**Total YTD:** {fmt_currency(total_ytd)} | **Total Withheld:** {fmt_currency(total_withheld)} | **Projected Annual:** {fmt_currency(total_projected)}")
     else:
         st.info("👆 Add your first income source above to get started!")
 
@@ -973,14 +995,8 @@ with tab2:
 # =============================================================================
 
 with tab3:
-    st.markdown("""
-        <div class="tax-card">
-            <div class="tax-card-header">🔮 What-If Tax Simulator</div>
-            <p style="color: var(--text-light);">
-                See how different scenarios could affect your tax outcome
-            </p>
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown("### 🔮 What-If Tax Simulator")
+    st.markdown("See how different scenarios could affect your tax outcome")
     
     simulator = TaxSimulator(profile)
     
@@ -1014,7 +1030,7 @@ with tab3:
         if st.button("Clear All", use_container_width=True, key="sim_clear"):
             st.session_state.simulations = []
     
-    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown("---")
     
     # Custom Simulation
     st.markdown("**Custom Simulation**")
@@ -1025,7 +1041,7 @@ with tab3:
         add_401k = st.number_input(
             f"Additional 401(k) (Room: {fmt_currency(profile.remaining_401k_room)})",
             min_value=0.0,
-            max_value=float(profile.remaining_401k_room),
+            max_value=float(max(0, profile.remaining_401k_room)),
             value=0.0,
             step=500.0,
             key="custom_401k"
@@ -1035,7 +1051,7 @@ with tab3:
         add_hsa = st.number_input(
             f"Additional HSA (Room: {fmt_currency(profile.remaining_hsa_room)})",
             min_value=0.0,
-            max_value=float(profile.remaining_hsa_room),
+            max_value=float(max(0, profile.remaining_hsa_room)),
             value=0.0,
             step=100.0,
             key="custom_hsa"
@@ -1067,7 +1083,7 @@ with tab3:
             st.warning("Please enter at least one value to simulate")
     
     # Results
-    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown("---")
     st.markdown("**Simulation Results**")
     
     if st.session_state.simulations:
@@ -1076,69 +1092,232 @@ with tab3:
             savings = abs(sim.tax_difference)
             
             icon = "✅" if is_beneficial else "⚠️"
-            color = "var(--accent-green)" if is_beneficial else "var(--warning-red)"
             
-            st.markdown(f"""
-                <div class="rec-card {'low-priority' if is_beneficial else 'high-priority'}">
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <div>
-                            <div class="rec-title">{icon} {sim.scenario_name}</div>
-                            <div style="color: var(--text-light); font-size: 0.9rem;">
-                                {sim.summary}
-                            </div>
-                        </div>
-                        <div style="text-align: right;">
-                            <div style="font-size: 0.85rem; color: var(--text-light);">
-                                {'Tax Savings' if is_beneficial else 'Tax Increase'}
-                            </div>
-                            <div class="rec-savings" style="color: {color};">
-                                {fmt_currency(savings)}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
+            with st.container():
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(f"**{icon} {sim.scenario_name}**")
+                    st.caption(sim.summary)
+                with col2:
+                    if is_beneficial:
+                        st.success(f"Save {fmt_currency(savings)}")
+                    else:
+                        st.error(f"+{fmt_currency(savings)}")
     else:
         st.info("Run a simulation to see results here")
 
 
 # =============================================================================
-# TAB 4: RECOMMENDATIONS
+# TAB 4: AI STRATEGIES
 # =============================================================================
 
 with tab4:
+    st.markdown("### 🤖 AI-Powered Tax Strategies")
+    st.markdown("Get personalized tax reduction strategies powered by GPT-5.1 with adaptive reasoning")
+    
+    # AI Status
+    ai_client = get_ai_client()
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        if ai_client.is_connected:
+            st.success("🟢 **Connected to OpenAI GPT-5.1** - AI-powered analysis available")
+        else:
+            st.warning("🔴 **AI Offline** - Add `OPENAI_API_KEY` to Streamlit secrets for personalized strategies")
+    
+    with col2:
+        st.markdown(f"**Model:** `{ai_client.model}`")
+    
+    st.markdown("---")
+    
+    # Generate AI Strategies Button
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        generate_btn = st.button(
+            "🚀 Generate AI Tax Strategies",
+            type="primary",
+            use_container_width=True,
+            key="generate_ai_strategies"
+        )
+    
+    if generate_btn:
+        # Create a prominent privacy notice at the top
+        privacy_notice = st.empty()
+        privacy_notice.info("🛡️ **Privacy Protection Active** - Your personal information will be removed before any data is sent to AI")
+        
+        # Show the privacy pipeline
+        pipeline_placeholder = st.empty()
+        status_placeholder = st.empty()
+        
+        pipeline_steps = [
+            {"title": "Collecting Financial Data", "description": "Gathering income, deductions, and tax information from your profile...", "icon": "📊"},
+            {"title": "Scanning for Personal Information", "description": "Detecting SSN, names, addresses, phone numbers, emails, account numbers...", "icon": "🔍"},
+            {"title": "Removing All PII", "description": "Replacing personal identifiers with anonymous placeholders...", "icon": "🚫"},
+            {"title": "Verifying Anonymization", "description": "Double-checking that NO personal information remains...", "icon": "✓"},
+            {"title": "Secure Transmission", "description": "Sending ONLY anonymized financial numbers to GPT-5.1...", "icon": "🔐"},
+            {"title": "AI Analysis in Progress", "description": "GPT-5.1 analyzing your tax situation with adaptive reasoning...", "icon": "🤖"},
+        ]
+        
+        # Step 1: Collecting data
+        status_placeholder.warning("⏳ Step 1/6: Collecting your financial data...")
+        show_pii_pipeline(pipeline_placeholder, 0, pipeline_steps)
+        time.sleep(0.6)
+        
+        # Step 2: Scanning for PII
+        status_placeholder.warning("⏳ Step 2/6: Scanning for personal information...")
+        show_pii_pipeline(pipeline_placeholder, 1, pipeline_steps)
+        time.sleep(0.7)
+        
+        # Actually anonymize the data
+        anonymized_profile = create_anonymized_profile(profile)
+        anonymized_result = create_anonymized_tax_result(result)
+        
+        pii_removed = [
+            "Social Security Numbers (SSN)",
+            "Full Names", 
+            "Street Addresses",
+            "Phone Numbers",
+            "Email Addresses", 
+            "Bank Account Numbers",
+            "Employer Identification Numbers (EIN)"
+        ]
+        
+        # Step 3: Removing PII
+        status_placeholder.warning("⏳ Step 3/6: Removing all personal information...")
+        show_pii_pipeline(pipeline_placeholder, 2, pipeline_steps, pii_removed)
+        time.sleep(0.8)
+        
+        # Step 4: Verifying
+        status_placeholder.warning("⏳ Step 4/6: Verifying complete anonymization...")
+        show_pii_pipeline(pipeline_placeholder, 3, pipeline_steps, pii_removed)
+        time.sleep(0.5)
+        
+        # Step 5: Secure transmission
+        status_placeholder.warning("⏳ Step 5/6: Establishing secure connection to GPT-5.1...")
+        show_pii_pipeline(pipeline_placeholder, 4, pipeline_steps, pii_removed)
+        time.sleep(0.4)
+        
+        # Step 6: AI Analysis
+        status_placeholder.info("🤖 Step 6/6: GPT-5.1 is analyzing your tax situation...")
+        show_pii_pipeline(pipeline_placeholder, 5, pipeline_steps, pii_removed)
+        
+        # Make the AI call
+        response = ai_client.generate_strategies(
+            anonymized_profile=anonymized_profile,
+            current_tax_result=anonymized_result
+        )
+        
+        # Clear the pipeline display
+        pipeline_placeholder.empty()
+        status_placeholder.empty()
+        privacy_notice.empty()
+        
+        if response.success:
+            st.session_state.ai_strategies = response.content
+            
+            # Show success message with privacy confirmation
+            tokens_msg = f" ({response.tokens_used} tokens used)" if response.tokens_used else ""
+            st.success(f"✅ Strategies generated successfully!{tokens_msg}")
+            st.info("🛡️ **Privacy Confirmed**: Only anonymized financial data was sent to GPT-5.1. Your personal information (SSN, name, address, etc.) was never transmitted.")
+        else:
+            st.error(f"Error generating strategies: {response.error}")
+    
+    # Display AI Strategies
+    if st.session_state.ai_strategies:
+        st.markdown("---")
+        
+        # Show what data was sent
+        with st.expander("🔍 View Anonymized Data Sent to AI", expanded=False):
+            st.markdown("**This is the ONLY data that was sent to the AI - no personal information:**")
+            
+            anonymized_profile = create_anonymized_profile(profile)
+            anonymized_result = create_anonymized_tax_result(result)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Financial Profile (Anonymized):**")
+                st.json(anonymized_profile)
+            with col2:
+                st.markdown("**Tax Calculation Results:**")
+                st.json(anonymized_result)
+        
+        st.markdown("### 📋 Your Personalized Tax Strategies")
+        st.markdown(st.session_state.ai_strategies)
+    
+    # Custom AI Question
+    st.markdown("---")
+    st.markdown("### 💬 Ask the AI a Tax Question")
+    
+    custom_question = st.text_area(
+        "Describe a tax scenario or ask a question:",
+        placeholder="e.g., 'What if I started a side business?' or 'Should I convert my Traditional IRA to a Roth?'",
+        key="ai_custom_question"
+    )
+    
+    if st.button("🔍 Analyze Scenario", key="analyze_scenario_btn"):
+        if custom_question:
+            # Show privacy pipeline for scenario analysis
+            st.info("🛡️ **Privacy Protection Active** - Anonymizing your data before AI analysis...")
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            status_text.text("Step 1/4: Collecting financial context...")
+            progress_bar.progress(25)
+            time.sleep(0.3)
+            
+            status_text.text("Step 2/4: Removing personal information (SSN, names, addresses)...")
+            progress_bar.progress(50)
+            anonymized_profile = create_anonymized_profile(profile)
+            anonymized_result = create_anonymized_tax_result(result)
+            time.sleep(0.4)
+            
+            status_text.text("Step 3/4: Verifying anonymization complete...")
+            progress_bar.progress(75)
+            time.sleep(0.3)
+            
+            status_text.text("Step 4/4: GPT-5.1 analyzing your scenario...")
+            progress_bar.progress(100)
+            
+            response = ai_client.analyze_scenario(
+                scenario_description=custom_question,
+                anonymized_profile=anonymized_profile,
+                current_tax_result=anonymized_result
+            )
+            
+            # Clear progress
+            progress_bar.empty()
+            status_text.empty()
+            
+            if response.success:
+                st.success("🛡️ Analysis complete! Only anonymized data was sent to GPT-5.1.")
+                st.markdown("### Analysis Results")
+                st.markdown(response.content)
+            else:
+                st.error(f"Error: {response.error}")
+        else:
+            st.warning("Please enter a question or scenario to analyze")
+
+
+# =============================================================================
+# TAB 5: RECOMMENDATIONS
+# =============================================================================
+
+with tab5:
     recs = st.session_state.recommendations
     
     if recs:
         # Summary Banner
-        st.markdown(f"""
-            <div style="background: linear-gradient(135deg, var(--accent-green) 0%, #0A8F5C 100%); 
-                        color: white; padding: 24px; border-radius: 12px; margin-bottom: 24px;">
-                <div style="font-size: 0.9rem; opacity: 0.9; margin-bottom: 8px;">
-                    Maximum Potential Tax Savings
-                </div>
-                <div style="font-size: 2.5rem; font-weight: 700;">
-                    {fmt_currency(recs.max_potential_savings)}
-                </div>
-                <div style="font-size: 0.9rem; opacity: 0.9; margin-top: 8px;">
-                    {recs.days_until_year_end} days left to take action this year
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
+        st.success(f"💰 **Maximum Potential Tax Savings: {fmt_currency(recs.max_potential_savings)}** — {recs.days_until_year_end} days left to take action this year")
         
         # Basic Recommendations
         st.markdown("### 🎯 Basic Recommendations")
         st.markdown("*Actions anyone can take*")
         
         for rec in recs.basic_recommendations:
-            priority_class = {
-                "critical": "high-priority",
-                "high": "high-priority", 
-                "medium": "medium-priority",
-                "low": "low-priority"
-            }.get(rec.priority.value, "")
+            priority_icon = "🔴" if rec.priority.value in ['critical', 'high'] else "🟡" if rec.priority.value == 'medium' else "🟢"
             
-            with st.expander(f"{'🔴' if rec.priority.value in ['critical', 'high'] else '🟡' if rec.priority.value == 'medium' else '🟢'} {rec.title} — Save {fmt_currency(rec.potential_tax_savings)}"):
+            with st.expander(f"{priority_icon} {rec.title} — Save {fmt_currency(rec.potential_tax_savings)}"):
                 st.write(rec.description)
                 st.markdown(f"**Action Required:** {rec.action_required}")
                 
@@ -1154,7 +1333,7 @@ with tab4:
         
         # Advanced Recommendations
         if recs.advanced_recommendations:
-            st.markdown("<hr>", unsafe_allow_html=True)
+            st.markdown("---")
             st.markdown("### 🚀 Advanced Strategies")
             st.markdown("*Life-changing opportunities that may require professional guidance*")
             
@@ -1177,34 +1356,96 @@ with tab4:
 
 
 # =============================================================================
-# TAB 5: PRIVACY DEMO
+# TAB 6: PRIVACY
 # =============================================================================
 
-with tab5:
+with tab6:
+    st.markdown("### 🔒 Privacy Air Gap Technology")
     st.markdown("""
-        <div class="tax-card">
-            <div class="tax-card-header">🔒 PII Protection Demo</div>
-            <p style="color: var(--text-light);">
-                TaxGuard AI uses a "Privacy Air Gap" to ensure your personal information 
-                never reaches external AI services.
-            </p>
+        TaxGuard AI uses a "Privacy Air Gap" to ensure your personal information 
+        **NEVER** reaches external AI services.
+    """)
+    
+    # How it works - Visual Pipeline
+    st.markdown("### How Your Data is Protected")
+    
+    st.markdown("""
+        <div class="privacy-pipeline">
+            <div class="pipeline-step completed">
+                <div class="pipeline-icon">1️⃣</div>
+                <div>
+                    <div style="font-weight: 500;">You Enter Data</div>
+                    <div style="font-size: 0.85rem; opacity: 0.8;">Income, deductions, personal info</div>
+                </div>
+            </div>
+            <div class="pipeline-step completed">
+                <div class="pipeline-icon">2️⃣</div>
+                <div>
+                    <div style="font-weight: 500;">PII Detection</div>
+                    <div style="font-size: 0.85rem; opacity: 0.8;">AI + Regex identifies SSN, names, addresses</div>
+                </div>
+            </div>
+            <div class="pipeline-step completed">
+                <div class="pipeline-icon">3️⃣</div>
+                <div>
+                    <div style="font-weight: 500;">PII Removal</div>
+                    <div style="font-size: 0.85rem; opacity: 0.8;">Personal info replaced with [REDACTED]</div>
+                </div>
+            </div>
+            <div class="pipeline-step completed">
+                <div class="pipeline-icon">4️⃣</div>
+                <div>
+                    <div style="font-weight: 500;">AI Processing</div>
+                    <div style="font-size: 0.85rem; opacity: 0.8;">Only anonymized numbers sent to GPT-5.1</div>
+                </div>
+            </div>
+            <div class="pipeline-step completed">
+                <div class="pipeline-icon">5️⃣</div>
+                <div>
+                    <div style="font-weight: 500;">Results Returned</div>
+                    <div style="font-size: 0.85rem; opacity: 0.8;">Strategies based on your financial situation</div>
+                </div>
+            </div>
         </div>
     """, unsafe_allow_html=True)
     
-    # How it works
-    st.markdown("""
-        ### How It Works
-        
-        1. **Upload** - You upload your paystub or tax document
-        2. **Redact** - Our system automatically detects and removes all PII
-        3. **Analyze** - Only anonymized financial data is processed
-        4. **Calculate** - Tax calculations happen 100% locally in Python
-    """)
+    # What gets removed vs what gets sent
+    col1, col2 = st.columns(2)
     
-    st.markdown("<hr>", unsafe_allow_html=True)
+    with col1:
+        st.markdown("""
+            ### 🚫 What is REMOVED
+            
+            Before any data goes to AI:
+            - ❌ Social Security Numbers
+            - ❌ Names (yours, spouse, employer)
+            - ❌ Addresses
+            - ❌ Phone Numbers
+            - ❌ Email Addresses
+            - ❌ Bank Account Numbers
+            - ❌ Employer IDs (EIN)
+            - ❌ Any identifying text
+        """)
+    
+    with col2:
+        st.markdown("""
+            ### ✅ What IS Sent to AI
+            
+            Only anonymized financial data:
+            - ✅ Income amounts (no source names)
+            - ✅ Tax withholding amounts
+            - ✅ Deduction totals
+            - ✅ Filing status
+            - ✅ Age bracket (not exact age)
+            - ✅ Number of dependents
+            - ✅ Contribution amounts
+            - ✅ Tax calculation results
+        """)
+    
+    st.markdown("---")
     
     # Live Demo
-    st.markdown("### Try It Yourself")
+    st.markdown("### 🔬 Try It Yourself")
     
     demo_text = """ACME Corporation
 Employee: John A. Smith
@@ -1242,91 +1483,50 @@ Employer EIN: 12-3456789"""
     with col2:
         st.markdown("**🛡️ After Redaction**")
         
-        if st.button("🔍 Redact PII", type="primary", key="redact_btn"):
-            redactor = PIIRedactor(use_ner=False)
-            result = redactor.redact_sensitive_data(input_text)
+        if st.button("🔍 Run PII Redaction", type="primary", key="redact_btn"):
+            # Show progress
+            with st.spinner("🔍 Scanning for personal information..."):
+                time.sleep(0.5)
+                
+                # Run redaction
+                redactor = PIIRedactor(use_ner=False)
+                redact_result = redactor.redact_sensitive_data(input_text)
             
             st.text_area(
                 "Output",
-                value=result.redacted_text,
+                value=redact_result.redacted_text,
                 height=350,
                 disabled=True,
                 label_visibility="collapsed",
                 key="privacy_output"
             )
             
-            st.markdown(f"""
-                <div class="success-toast">
-                    ✅ Redacted {result.redaction_count} PII items in {result.processing_time_ms:.1f}ms
-                </div>
-            """, unsafe_allow_html=True)
+            st.success(f"✅ Redacted **{redact_result.redaction_count}** PII items in **{redact_result.processing_time_ms:.1f}ms**")
             
-            if result.pii_types_found:
-                st.markdown("**PII Types Detected:**")
-                for pii_type in result.pii_types_found:
-                    st.markdown(f"- {pii_type}")
+            if redact_result.pii_types_found:
+                st.markdown("**PII Types Detected & Removed:**")
+                for pii_type in redact_result.pii_types_found:
+                    st.markdown(f"- 🚫 {pii_type}")
         else:
             st.text_area(
                 "Output",
-                value="Click 'Redact PII' to see the result...",
+                value="Click 'Run PII Redaction' to see the result...",
                 height=350,
                 disabled=True,
                 label_visibility="collapsed",
                 key="privacy_placeholder"
             )
-    
-    # Security Features
-    st.markdown("<hr>", unsafe_allow_html=True)
-    
-    st.markdown("### 🔐 Security Features")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("""
-            **SSN Detection**
-            
-            Catches multiple formats:
-            - 123-45-6789
-            - 123 45 6789
-            - 9-digit sequences
-        """)
-    
-    with col2:
-        st.markdown("""
-            **Contact Info**
-            
-            Removes:
-            - Email addresses
-            - Phone numbers
-            - Physical addresses
-        """)
-    
-    with col3:
-        st.markdown("""
-            **Financial Data**
-            
-            Preserves:
-            - Dollar amounts
-            - Tax figures
-            - YTD totals
-        """)
 
 
 # =============================================================================
 # FOOTER
 # =============================================================================
 
-st.markdown("<hr>", unsafe_allow_html=True)
+st.markdown("---")
 
-st.markdown("""
-    <div style="text-align: center; color: var(--text-light); font-size: 0.85rem; padding: 20px;">
-        <p>
-            <strong>⚠️ Disclaimer:</strong> TaxGuard AI provides estimates only and is not a substitute for professional tax advice.
-            Calculations are based on 2025 federal tax rules and may not account for all deductions, credits, or individual circumstances.
-        </p>
-        <p style="margin-top: 12px;">
-            🛡️ TaxGuard AI — Privacy-First Tax Estimation — Your data never leaves your device
-        </p>
-    </div>
-""", unsafe_allow_html=True)
+st.caption("""
+    ⚠️ **Disclaimer:** TaxGuard AI provides estimates only and is not a substitute for professional tax advice.
+    Calculations are based on 2025 federal tax rules and may not account for all deductions, credits, or individual circumstances.
+    
+    🛡️ TaxGuard AI — Privacy-First Tax Estimation — **Your personal data NEVER leaves your device**
+""")

@@ -4,6 +4,26 @@
 
 A full-stack web application that helps users estimate their federal tax liability, run what-if simulations, and receive AI-powered recommendations—all while ensuring their sensitive financial data never leaves their control.
 
+## 🚀 NEW: OpenAI GPT-5.1 Integration
+
+TaxGuard AI now features **live AI-powered tax strategy generation** using OpenAI's GPT-5.1 model with adaptive reasoning:
+
+- **Personalized Strategies**: AI analyzes your anonymized financial data to generate custom tax reduction strategies
+- **Transparent Privacy Pipeline**: Watch in real-time as your PII is removed before any data reaches the AI
+- **Adaptive Reasoning**: GPT-5.1 intelligently allocates compute based on task complexity
+- **No API Key Required**: Core features work without AI; add OpenAI key for enhanced strategies
+
+### Adding Your OpenAI API Key
+
+**For Streamlit Cloud:**
+1. Go to your app's settings → Secrets
+2. Add: `OPENAI_API_KEY = "sk-..."`
+
+**For Local Development:**
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
 ![Architecture](docs/architecture.png)
 
 ## 🔐 Security Architecture
@@ -88,6 +108,32 @@ A full-stack web application that helps users estimate their federal tax liabili
 
 ## 🚀 Quick Start
 
+### Option 1: Deploy to Streamlit Cloud (Recommended)
+
+1. **Push to GitHub:**
+```bash
+git init
+git add .
+git commit -m "TaxGuard AI"
+git remote add origin https://github.com/YOUR_USERNAME/taxguard-ai.git
+git push -u origin main
+```
+
+2. **Deploy on Streamlit Cloud:**
+   - Go to [share.streamlit.io](https://share.streamlit.io)
+   - Click "Create app"
+   - Select your repository
+   - Set main file path: `streamlit_app.py`
+   - Click "Deploy"
+
+3. **Add OpenAI API Key (Optional):**
+   - Go to App Settings → Secrets
+   - Add: `OPENAI_API_KEY = "sk-..."`
+
+Your app will be live at `https://your-app.streamlit.app` in minutes!
+
+### Option 2: Run Locally
+
 ### Prerequisites
 - Python 3.10+
 - Tesseract OCR (for image processing)
@@ -137,8 +183,14 @@ API docs at `http://localhost:8000/docs`
 
 ```
 taxguard-ai/
+├── streamlit_app.py            # 🆕 Streamlit Cloud entry point
+├── requirements.txt            # Root-level dependencies
+├── packages.txt                # Linux dependencies (tesseract)
+├── .streamlit/
+│   └── config.toml             # Theme config (TurboTax colors)
 ├── backend/
 │   ├── app.py                  # 🆕 Professional Streamlit UI (TurboTax-style)
+│   ├── openai_client.py        # 🆕 GPT-4.1 integration
 │   ├── main.py                 # FastAPI application (API mode)
 │   ├── streamlit_app.py        # Simple Streamlit UI (legacy)
 │   ├── taxguard_testing.ipynb  # Jupyter notebook for testing

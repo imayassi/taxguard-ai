@@ -21,8 +21,8 @@ Pillow>=10.0.0
 # NER for PII Detection
 spacy>=3.7.0
 
-# LLM Integration (uncomment when using real API)
-# openai>=1.3.0
+# LLM Integration
+openai>=1.3.0
 # anthropic>=0.7.0
 
 # Async Support

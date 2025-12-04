@@ -16,18 +16,25 @@ Run with: streamlit run app.py
 import sys
 import os
 
-# Add the backend directory to path for imports (needed for Streamlit Cloud)
-# Use os.path for more reliable path resolution
+# Get the directory where this file lives
 _current_file = os.path.abspath(__file__)
 _backend_dir = os.path.dirname(_current_file)
+
+# Print debug info
+print(f"[TaxGuard] Current file: {_current_file}")
+print(f"[TaxGuard] Backend dir: {_backend_dir}")
+print(f"[TaxGuard] sys.path before: {sys.path[:3]}...")
+
+# Add backend directory to path (at the front)
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
-# Also try parent directory in case running from root
-_parent_dir = os.path.dirname(_backend_dir)
-_parent_backend = os.path.join(_parent_dir, 'backend')
-if os.path.exists(_parent_backend) and _parent_backend not in sys.path:
-    sys.path.insert(0, _parent_backend)
+# Also set working directory
+os.chdir(_backend_dir)
+
+print(f"[TaxGuard] sys.path after: {sys.path[:3]}...")
+print(f"[TaxGuard] CWD: {os.getcwd()}")
+print(f"[TaxGuard] Files in backend: {os.listdir(_backend_dir)[:5]}...")
 
 import streamlit as st
 import pandas as pd
@@ -48,11 +55,56 @@ from enhanced_models import (
 )
 from pii_redaction import PIIRedactor
 from tax_simulator import TaxCalculator, TaxSimulator, RecommendationEngine
-from advanced_strategies import get_all_strategies, StrategyCategory
-from openai_client import (
-    TaxAIClient, get_ai_client, create_anonymized_profile, 
-    create_anonymized_tax_result, AIProvider
-)
+
+# Optional imports - these won't crash the app if missing
+try:
+    from advanced_strategies import get_all_advanced_strategies, StrategyCategory
+    ADVANCED_STRATEGIES_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: advanced_strategies not available: {e}")
+    ADVANCED_STRATEGIES_AVAILABLE = False
+    get_all_advanced_strategies = None
+    StrategyCategory = None
+
+try:
+    from openai_client import (
+        TaxAIClient, get_ai_client, create_anonymized_profile, 
+        create_anonymized_tax_result, AIProvider
+    )
+    OPENAI_CLIENT_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: openai_client not available: {e}")
+    OPENAI_CLIENT_AVAILABLE = False
+    
+    # Provide fallback implementations
+    class AIProvider:
+        MOCK = "mock"
+        OPENAI = "openai"
+    
+    class MockAIClient:
+        is_connected = False
+        model = "mock"
+        def generate_strategies(self, **kwargs):
+            from dataclasses import dataclass
+            @dataclass
+            class MockResponse:
+                content: str = "AI features require OpenAI integration. Please check the logs for import errors."
+                success: bool = True
+                tokens_used: int = 0
+            return MockResponse()
+        def analyze_scenario(self, **kwargs):
+            return self.generate_strategies()
+    
+    def get_ai_client():
+        if 'ai_client' not in st.session_state:
+            st.session_state.ai_client = MockAIClient()
+        return st.session_state.ai_client
+    
+    def create_anonymized_profile(profile):
+        return {"filing_status": str(profile.filing_status), "note": "mock profile"}
+    
+    def create_anonymized_tax_result(result):
+        return {"gross_income": result.gross_income, "note": "mock result"}
 
 
 # =============================================================================

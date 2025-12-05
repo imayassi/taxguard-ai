@@ -1,26 +1,21 @@
 """
-TaxGuard AI - Professional Streamlit Application
-=================================================
-A privacy-first tax estimation app with TurboTax-inspired design.
+TaxGuard AI v2 - Streamlined Tax Gap Calculator
+================================================
+A privacy-first tax estimation app with clean, minimal UX.
 
-Features:
-- Multiple income source tracking (spouse, multiple jobs, 1099s)
-- Real-time refund/owed calculation
-- What-if simulations
-- AI-powered recommendations (OpenAI GPT-5.1)
-- Transparent PII protection (privacy air gap)
-
-Run with: streamlit run app.py
+Flow:
+1. Upload Forms → AI Extraction (GPT-5.1)
+2. Tax Gap Analysis (Withholding vs True Liability)
+3. Fix It Strategies (Top 10 ranked by impact)
+4. What-If Scenarios (free-text life changes)
 """
 
 import sys
 import os
 
-# Get the directory where this file lives
+# Path setup for Streamlit Cloud
 _current_file = os.path.abspath(__file__)
 _backend_dir = os.path.dirname(_current_file)
-
-# Add backend directory to path (at the front) - but DON'T change working directory
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
@@ -30,6 +25,7 @@ from datetime import date, datetime
 from typing import Optional, List, Dict, Any
 import time
 import json
+import re
 
 # Import backend modules
 from tax_constants import (
@@ -44,15 +40,13 @@ from enhanced_models import (
 from pii_redaction import PIIRedactor
 from tax_simulator import TaxCalculator, TaxSimulator, RecommendationEngine
 
-# Optional imports - these won't crash the app if missing
+# Optional imports
 try:
     from advanced_strategies import get_all_advanced_strategies, StrategyCategory
     ADVANCED_STRATEGIES_AVAILABLE = True
-except ImportError as e:
-    print(f"Warning: advanced_strategies not available: {e}")
+except ImportError:
     ADVANCED_STRATEGIES_AVAILABLE = False
     get_all_advanced_strategies = None
-    StrategyCategory = None
 
 try:
     from openai_client import (
@@ -60,11 +54,9 @@ try:
         create_anonymized_tax_result, AIProvider
     )
     OPENAI_CLIENT_AVAILABLE = True
-except ImportError as e:
-    print(f"Warning: openai_client not available: {e}")
+except ImportError:
     OPENAI_CLIENT_AVAILABLE = False
     
-    # Provide fallback implementations
     class AIProvider:
         MOCK = "mock"
         OPENAI = "openai"
@@ -72,27 +64,26 @@ except ImportError as e:
     class MockAIClient:
         is_connected = False
         model = "mock"
+        client = None
         def generate_strategies(self, **kwargs):
             from dataclasses import dataclass
             @dataclass
             class MockResponse:
-                content: str = "AI features require OpenAI integration. Please check the logs for import errors."
+                content: str = "AI features require OpenAI API key."
                 success: bool = True
                 tokens_used: int = 0
             return MockResponse()
-        def analyze_scenario(self, **kwargs):
-            return self.generate_strategies()
     
     def get_ai_client():
         if 'ai_client' not in st.session_state:
             st.session_state.ai_client = MockAIClient()
         return st.session_state.ai_client
     
-    def create_anonymized_profile(profile):
-        return {"filing_status": str(profile.filing_status), "note": "mock profile"}
+    def create_anonymized_profile(profile, num_income_sources=1):
+        return {"filing_status": str(profile.filing_status)}
     
     def create_anonymized_tax_result(result):
-        return {"gross_income": result.gross_income, "note": "mock result"}
+        return {"gross_income": result.gross_income}
 
 
 # =============================================================================
@@ -100,391 +91,202 @@ except ImportError as e:
 # =============================================================================
 
 st.set_page_config(
-    page_title="TaxGuard AI - Smart Tax Estimation",
+    page_title="TaxGuard AI - Smart Tax Gap Calculator",
     page_icon="🛡️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 
 # =============================================================================
-# CUSTOM CSS - TURBOTAX INSPIRED THEME
+# CUSTOM CSS - CLEAN MINIMAL DESIGN
 # =============================================================================
 
 st.markdown("""
 <style>
-    /* Import Google Fonts */
-    @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&family=Source+Sans+Pro:wght@300;400;600;700&display=swap');
-    
-    /* Root Variables - TurboTax Color Scheme */
-    :root {
-        --primary-blue: #0077C5;
-        --primary-blue-dark: #005B9A;
-        --primary-blue-light: #E6F3FB;
-        --secondary-blue: #0097D8;
-        --accent-green: #14A66B;
-        --accent-green-light: #E8F7F0;
-        --warning-red: #D52B1E;
-        --warning-red-light: #FDEEEC;
-        --warning-orange: #F5A623;
-        --text-dark: #1A1A1A;
-        --text-medium: #4A4A4A;
-        --text-light: #6B6B6B;
-        --bg-light: #F8FAFB;
-        --bg-card: #FFFFFF;
-        --border-light: #E0E6EB;
-        --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
-        --shadow-md: 0 4px 12px rgba(0,0,0,0.1);
-        --shadow-lg: 0 8px 24px rgba(0,0,0,0.12);
-    }
-    
-    /* Global Styles */
-    .stApp {
-        background-color: var(--bg-light);
-        font-family: 'Open Sans', 'Source Sans Pro', sans-serif;
-    }
-    
-    /* Hide Streamlit Branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    
-    /* Main Content Area */
+    /* Clean, minimal styling */
     .main .block-container {
-        padding-top: 1rem;
+        padding-top: 2rem;
         padding-bottom: 2rem;
         max-width: 1200px;
     }
     
-    /* Sidebar Styling */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, var(--primary-blue) 0%, var(--primary-blue-dark) 100%);
-        padding-top: 0;
-    }
-    
-    [data-testid="stSidebar"] .stMarkdown {
-        color: white;
-    }
-    
-    [data-testid="stSidebar"] label {
-        color: rgba(255,255,255,0.9) !important;
-    }
-    
-    [data-testid="stSidebar"] .stSelectbox label,
-    [data-testid="stSidebar"] .stNumberInput label {
-        color: rgba(255,255,255,0.9) !important;
-        font-weight: 500;
-    }
-    
-    /* Custom Card Styles */
-    .tax-card {
-        background: var(--bg-card);
-        border-radius: 12px;
-        padding: 24px;
-        box-shadow: var(--shadow-sm);
-        border: 1px solid var(--border-light);
-        margin-bottom: 16px;
-    }
-    
-    .tax-card-header {
-        font-size: 1.1rem;
-        font-weight: 600;
-        color: var(--text-dark);
-        margin-bottom: 16px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    
-    /* Result Cards */
-    .result-card {
-        background: var(--bg-card);
-        border-radius: 16px;
-        padding: 32px;
+    /* Header styling */
+    .main-header {
         text-align: center;
-        box-shadow: var(--shadow-md);
-        border: 2px solid transparent;
-    }
-    
-    .result-card.refund {
-        border-color: var(--accent-green);
-        background: linear-gradient(135deg, var(--accent-green-light) 0%, white 100%);
-    }
-    
-    .result-card.owed {
-        border-color: var(--warning-red);
-        background: linear-gradient(135deg, var(--warning-red-light) 0%, white 100%);
-    }
-    
-    .result-label {
-        font-size: 0.9rem;
-        color: var(--text-light);
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        margin-bottom: 8px;
-    }
-    
-    .result-amount {
-        font-size: 3rem;
-        font-weight: 700;
-        margin-bottom: 8px;
-    }
-    
-    .result-amount.refund {
-        color: var(--accent-green);
-    }
-    
-    .result-amount.owed {
-        color: var(--warning-red);
-    }
-    
-    /* Metric Cards */
-    .metric-card {
-        background: var(--bg-card);
-        border-radius: 10px;
-        padding: 20px;
-        box-shadow: var(--shadow-sm);
-        border: 1px solid var(--border-light);
-    }
-    
-    .metric-label {
-        font-size: 0.85rem;
-        color: var(--text-light);
-        margin-bottom: 4px;
-    }
-    
-    .metric-value {
-        font-size: 1.5rem;
-        font-weight: 600;
-        color: var(--text-dark);
-    }
-    
-    /* Progress Steps */
-    .progress-step {
-        display: flex;
-        align-items: center;
-        padding: 12px 16px;
-        margin: 4px 0;
-        border-radius: 8px;
-        color: rgba(255,255,255,0.7);
-        font-size: 0.95rem;
-    }
-    
-    .progress-step.active {
-        background: rgba(255,255,255,0.15);
-        color: white;
-        font-weight: 600;
-    }
-    
-    .progress-step.completed {
-        color: rgba(255,255,255,0.9);
-    }
-    
-    .step-number {
-        width: 28px;
-        height: 28px;
-        border-radius: 50%;
-        background: rgba(255,255,255,0.2);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        margin-right: 12px;
-        font-size: 0.85rem;
-        font-weight: 600;
-    }
-    
-    .progress-step.active .step-number {
-        background: white;
-        color: var(--primary-blue);
-    }
-    
-    .progress-step.completed .step-number {
-        background: var(--accent-green);
-        color: white;
-    }
-    
-    /* Buttons */
-    .stButton > button {
-        background: var(--primary-blue);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 12px 24px;
-        font-weight: 600;
-        font-size: 1rem;
-        transition: all 0.2s ease;
-    }
-    
-    .stButton > button:hover {
-        background: var(--primary-blue-dark);
-        box-shadow: var(--shadow-md);
-        transform: translateY(-1px);
-    }
-    
-    .stButton > button:active {
-        transform: translateY(0);
-    }
-    
-    /* Input Fields */
-    .stTextInput > div > div > input,
-    .stNumberInput > div > div > input,
-    .stSelectbox > div > div {
-        border-radius: 8px;
-        border: 1px solid var(--border-light);
-        padding: 12px;
-        font-size: 1rem;
-    }
-    
-    .stTextInput > div > div > input:focus,
-    .stNumberInput > div > div > input:focus {
-        border-color: var(--primary-blue);
-        box-shadow: 0 0 0 3px var(--primary-blue-light);
-    }
-    
-    /* Tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 0;
-        background: var(--bg-card);
-        border-radius: 12px;
-        padding: 4px;
-        box-shadow: var(--shadow-sm);
-    }
-    
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 8px;
-        padding: 12px 24px;
-        font-weight: 500;
-        color: var(--text-medium);
-    }
-    
-    .stTabs [aria-selected="true"] {
-        background: var(--primary-blue) !important;
-        color: white !important;
-    }
-    
-    /* Privacy Pipeline */
-    .privacy-pipeline {
+        padding: 2rem 0;
         background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        border-radius: 12px;
-        padding: 20px;
+        border-radius: 16px;
         color: white;
-        margin: 16px 0;
+        margin-bottom: 2rem;
     }
     
-    .pipeline-step {
-        display: flex;
-        align-items: center;
-        padding: 12px;
-        margin: 8px 0;
-        background: rgba(255,255,255,0.1);
-        border-radius: 8px;
-        transition: all 0.3s ease;
+    .main-header h1 {
+        font-size: 2.5rem;
+        margin-bottom: 0.5rem;
     }
     
-    .pipeline-step.active {
-        background: rgba(20, 166, 107, 0.3);
-        border: 1px solid #14A66B;
+    .main-header p {
+        opacity: 0.9;
+        font-size: 1.1rem;
     }
     
-    .pipeline-step.completed {
-        background: rgba(20, 166, 107, 0.2);
+    /* Upload area styling */
+    .upload-zone {
+        border: 2px dashed #14A66B;
+        border-radius: 16px;
+        padding: 3rem;
+        text-align: center;
+        background: #f8fffe;
+        margin: 2rem 0;
     }
     
-    .pipeline-step.pending {
-        opacity: 0.5;
+    .upload-zone h2 {
+        color: #14A66B;
+        margin-bottom: 1rem;
     }
     
-    .pipeline-icon {
+    /* Tax gap display */
+    .tax-gap-positive {
+        background: linear-gradient(135deg, #14A66B 0%, #0D8050 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 16px;
+        text-align: center;
+    }
+    
+    .tax-gap-negative {
+        background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 16px;
+        text-align: center;
+    }
+    
+    .tax-gap-amount {
+        font-size: 3rem;
+        font-weight: bold;
+        margin: 1rem 0;
+    }
+    
+    /* Strategy cards */
+    .strategy-card {
+        background: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+    
+    .strategy-card:hover {
+        box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+    }
+    
+    .strategy-rank {
+        background: #14A66B;
+        color: white;
         width: 32px;
         height: 32px;
         border-radius: 50%;
-        background: rgba(255,255,255,0.2);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: bold;
+        margin-right: 12px;
+    }
+    
+    .strategy-savings {
+        color: #14A66B;
+        font-size: 1.25rem;
+        font-weight: bold;
+    }
+    
+    /* Privacy notice */
+    .privacy-notice {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        color: white;
+        padding: 1rem 1.5rem;
+        border-radius: 8px;
+        margin: 1rem 0;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    
+    .privacy-notice .icon {
+        font-size: 1.5rem;
+    }
+    
+    /* Collapsible sections */
+    .stExpander {
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+    }
+    
+    /* Progress steps */
+    .step-indicator {
+        display: flex;
+        justify-content: center;
+        gap: 2rem;
+        margin: 2rem 0;
+    }
+    
+    .step {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        opacity: 0.5;
+    }
+    
+    .step.active {
+        opacity: 1;
+    }
+    
+    .step.completed {
+        opacity: 1;
+    }
+    
+    .step-number {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: #e0e0e0;
         display: flex;
         align-items: center;
         justify-content: center;
-        margin-right: 12px;
-        font-size: 1rem;
+        font-weight: bold;
+        margin-bottom: 8px;
     }
     
-    .pipeline-step.completed .pipeline-icon {
+    .step.active .step-number,
+    .step.completed .step-number {
         background: #14A66B;
-    }
-    
-    /* AI Status Badge */
-    .ai-status {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 8px 16px;
-        border-radius: 20px;
-        font-size: 0.85rem;
-        font-weight: 500;
-    }
-    
-    .ai-status.connected {
-        background: #E8F7F0;
-        color: #14A66B;
-    }
-    
-    .ai-status.disconnected {
-        background: #FDEEEC;
-        color: #D52B1E;
-    }
-    
-    /* Privacy Badge */
-    .privacy-badge {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
         color: white;
-        padding: 12px 16px;
-        border-radius: 8px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-size: 0.85rem;
-        margin-top: 16px;
     }
     
-    .privacy-badge .icon {
-        font-size: 1.2rem;
-    }
+    /* Hide Streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
     
-    /* Animation */
-    @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(10px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-    
-    @keyframes pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.5; }
-    }
-    
-    .animate-fade-in {
-        animation: fadeIn 0.4s ease-out;
-    }
-    
-    .animate-pulse {
-        animation: pulse 1.5s ease-in-out infinite;
-    }
-    
-    /* Redaction highlight */
-    .redacted {
-        background: #FFE066;
-        padding: 2px 4px;
-        border-radius: 3px;
-        font-family: monospace;
-    }
-    
-    /* Success toast */
-    .success-toast {
-        background: #E8F7F0;
+    /* Extracted data display */
+    .extracted-data {
+        background: #f0f9f4;
         border: 1px solid #14A66B;
-        color: #0D5C3D;
-        padding: 12px 16px;
-        border-radius: 8px;
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+    }
+    
+    .extracted-item {
         display: flex;
-        align-items: center;
-        gap: 8px;
+        justify-content: space-between;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid #e0e0e0;
+    }
+    
+    .extracted-item:last-child {
+        border-bottom: none;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -496,21 +298,40 @@ st.markdown("""
 
 def init_session_state():
     """Initialize all session state variables."""
-    defaults = {
-        'current_step': 1,
-        'profile': UserFinancialProfile(),
-        'enhanced_profile': EnhancedUserProfile(),
-        'tax_result': None,
-        'recommendations': None,
-        'simulations': [],
-        'income_sources': [],
-        'show_advanced': False,
-        'ai_strategies': None,
-        'pii_log': [],
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+    if 'step' not in st.session_state:
+        st.session_state.step = 1  # 1=Upload, 2=Review, 3=Results
+    
+    if 'extracted_data' not in st.session_state:
+        st.session_state.extracted_data = None
+    
+    if 'income_sources' not in st.session_state:
+        st.session_state.income_sources = []
+    
+    if 'deductions' not in st.session_state:
+        st.session_state.deductions = {
+            'mortgage_interest': 0,
+            'property_taxes': 0,
+            'state_local_taxes': 0,
+            'charitable': 0,
+            'medical': 0,
+            'other': 0,
+            'user_notes': ''
+        }
+    
+    if 'filing_status' not in st.session_state:
+        st.session_state.filing_status = FilingStatus.SINGLE
+    
+    if 'tax_result' not in st.session_state:
+        st.session_state.tax_result = None
+    
+    if 'tax_gap' not in st.session_state:
+        st.session_state.tax_gap = None
+    
+    if 'strategies' not in st.session_state:
+        st.session_state.strategies = None
+    
+    if 'last_year_data' not in st.session_state:
+        st.session_state.last_year_data = None
 
 init_session_state()
 
@@ -521,1550 +342,963 @@ init_session_state()
 
 def fmt_currency(amount: float) -> str:
     """Format number as currency."""
-    if amount is None:
-        return "$0"
-    return f"${amount:,.0f}"
-
-def fmt_currency_cents(amount: float) -> str:
-    """Format with cents."""
-    if amount is None:
-        return "$0.00"
+    if amount < 0:
+        return f"-${abs(amount):,.2f}"
     return f"${amount:,.2f}"
 
-def fmt_percent(rate: float) -> str:
-    """Format as percentage."""
-    if rate is None:
-        return "0%"
-    return f"{rate:.1f}%"
 
-def sync_and_calculate():
-    """Sync enhanced profile to standard profile and calculate taxes."""
-    ep = st.session_state.enhanced_profile
-    p = st.session_state.profile
+def calculate_projected_withholding(sources: List[Dict]) -> float:
+    """Calculate projected year-end withholding from all sources."""
+    total_withheld = 0
+    for src in sources:
+        ytd_withheld = src.get('ytd_federal_withheld', 0)
+        current_period = src.get('current_pay_period', 24)
+        pay_freq = src.get('pay_frequency', 'biweekly')
+        
+        periods_per_year = {
+            'weekly': 52, 'biweekly': 26, 'semimonthly': 24, 'monthly': 12
+        }.get(pay_freq, 26)
+        
+        if current_period > 0:
+            per_period = ytd_withheld / current_period
+            projected = per_period * periods_per_year
+        else:
+            projected = ytd_withheld
+        
+        total_withheld += projected
     
-    # Sync basic info
-    p.filing_status = ep.filing_status
-    p.age = ep.age
-    p.num_children_under_17 = ep.num_children_under_17
+    return total_withheld
+
+
+def calculate_true_liability(sources: List[Dict], deductions: Dict, filing_status: FilingStatus) -> Dict:
+    """Calculate true tax liability with standard vs itemized comparison."""
     
-    # Sync income
-    p.ytd_income = ep.total_ytd_w2_income
-    p.ytd_federal_withheld = ep.total_ytd_federal_withheld
-    p.estimated_payments_made = ep.total_estimated_payments
-    p.self_employment_income = ep.total_self_employment_income
+    # Calculate total income
+    total_income = sum(src.get('projected_annual_income', src.get('ytd_gross', 0)) for src in sources)
     
-    # Sync spouse income if married
-    if ep.spouse:
-        p.spouse_age = ep.spouse.age
-        p.ytd_income += ep.spouse.total_ytd_income
-        p.ytd_federal_withheld += ep.spouse.total_federal_withheld
+    # Standard deduction
+    standard_ded = STANDARD_DEDUCTION_2025.get(filing_status, 14600)
     
-    # Sync investments
-    p.interest_income = ep.investments.taxable_interest
-    p.dividend_income = ep.investments.ordinary_dividends
-    p.capital_gains_long = ep.investments.long_term_gains
-    p.capital_gains_short = ep.investments.short_term_gains
+    # Itemized deductions
+    itemized_ded = (
+        deductions.get('mortgage_interest', 0) +
+        deductions.get('property_taxes', 0) +
+        min(deductions.get('state_local_taxes', 0), 10000) +  # SALT cap
+        deductions.get('charitable', 0) +
+        max(0, deductions.get('medical', 0) - total_income * 0.075) +  # 7.5% AGI floor
+        deductions.get('other', 0)
+    )
     
-    # Sync retirement
-    p.ytd_401k_traditional = ep.ytd_401k_traditional
-    if ep.spouse:
-        p.ytd_401k_traditional += ep.spouse.total_401k
-    p.ytd_hsa = ep.ytd_hsa
-    p.hsa_coverage_type = "family" if ep.filing_status == FilingStatus.MARRIED_FILING_JOINTLY else "individual"
-    p.has_workplace_retirement_plan = True
+    # Choose better deduction
+    use_itemized = itemized_ded > standard_ded
+    deduction_amount = itemized_ded if use_itemized else standard_ded
     
-    # Set pay frequency from primary source
-    for s in ep.income_sources:
-        if s.source_type == IncomeSourceType.W2_PRIMARY:
-            p.pay_frequency = PayFrequency(s.pay_frequency.value)
-            p.current_pay_period = s.current_pay_period
+    # Taxable income
+    taxable_income = max(0, total_income - deduction_amount)
+    
+    # Calculate federal tax using brackets
+    brackets = TAX_BRACKETS_2025.get(filing_status, TAX_BRACKETS_2025[FilingStatus.SINGLE])
+    federal_tax = 0
+    remaining = taxable_income
+    
+    for i, (threshold, rate) in enumerate(brackets):
+        if i == 0:
+            prev_threshold = 0
+        else:
+            prev_threshold = brackets[i-1][0]
+        
+        bracket_income = min(remaining, threshold - prev_threshold) if threshold else remaining
+        federal_tax += bracket_income * rate
+        remaining -= bracket_income
+        
+        if remaining <= 0:
             break
     
-    # Calculate
-    calc = TaxCalculator()
-    st.session_state.tax_result = calc.calculate_tax(p)
+    # Get marginal rate
+    marginal_rate = 0.10
+    for threshold, rate in brackets:
+        if threshold is None or taxable_income <= threshold:
+            marginal_rate = rate
+            break
     
-    # Generate recommendations
-    engine = RecommendationEngine()
-    st.session_state.recommendations = engine.generate_recommendations(p)
-
-
-def show_pii_pipeline(placeholder, current_step: int, steps: List[Dict], pii_found: List[str] = None):
-    """Display the privacy pipeline progress."""
-    with placeholder.container():
-        html = """
-            <div class="privacy-pipeline">
-                <div style="display: flex; align-items: center; margin-bottom: 16px;">
-                    <span style="font-size: 1.5rem; margin-right: 12px;">🛡️</span>
-                    <div>
-                        <div style="font-weight: 600; font-size: 1.1rem;">Privacy Air Gap Active</div>
-                        <div style="font-size: 0.85rem; opacity: 0.8;">Your personal information is being protected</div>
-                    </div>
-                </div>
-        """
-        
-        for i, step in enumerate(steps):
-            if i < current_step:
-                status = "completed"
-                icon = "✓"
-            elif i == current_step:
-                status = "active"
-                icon = step.get('icon', '⏳')
-            else:
-                status = "pending"
-                icon = step.get('icon', '○')
-            
-            html += f"""
-                <div class="pipeline-step {status}">
-                    <div class="pipeline-icon">{icon}</div>
-                    <div>
-                        <div style="font-weight: 500;">{step['title']}</div>
-                        <div style="font-size: 0.85rem; opacity: 0.8;">{step['description']}</div>
-                    </div>
-                </div>
-            """
-        
-        if pii_found:
-            html += f"""
-                <div style="margin-top: 16px; padding: 12px; background: rgba(213, 43, 30, 0.2); border-radius: 8px;">
-                    <div style="font-weight: 500; margin-bottom: 8px;">🚫 PII Detected & Removed:</div>
-                    <div style="font-size: 0.9rem;">{', '.join(pii_found)}</div>
-                </div>
-            """
-        
-        html += "</div>"
-        st.markdown(html, unsafe_allow_html=True)
-
-
-# =============================================================================
-# SIDEBAR - NAVIGATION & PROFILE
-# =============================================================================
-
-with st.sidebar:
-    # Logo/Brand
-    st.markdown("""
-        <div style="text-align: center; padding: 20px 0 30px 0;">
-            <div style="font-size: 2.5rem; margin-bottom: 8px;">🛡️</div>
-            <div style="font-size: 1.5rem; font-weight: 700; color: white;">TaxGuard AI</div>
-            <div style="font-size: 0.85rem; color: rgba(255,255,255,0.7); margin-top: 4px;">
-                Smart Tax Estimation
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
+    effective_rate = (federal_tax / total_income * 100) if total_income > 0 else 0
     
-    # AI Connection Status
+    return {
+        'gross_income': total_income,
+        'deduction_type': 'itemized' if use_itemized else 'standard',
+        'deduction_amount': deduction_amount,
+        'standard_deduction': standard_ded,
+        'itemized_deduction': itemized_ded,
+        'taxable_income': taxable_income,
+        'federal_tax': federal_tax,
+        'effective_rate': effective_rate,
+        'marginal_rate': marginal_rate
+    }
+
+
+def extract_with_ai(text: str, doc_type: str) -> Dict:
+    """Use GPT-5.1 to extract financial data from document text."""
     ai_client = get_ai_client()
-    if ai_client.is_connected:
-        st.markdown("""
-            <div class="ai-status connected">
-                <span>🟢</span> GPT-5.1 Connected
-            </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown("""
-            <div class="ai-status disconnected">
-                <span>🔴</span> AI Offline (Add API Key)
-            </div>
-        """, unsafe_allow_html=True)
     
-    st.markdown("<hr style='border-color: rgba(255,255,255,0.1); margin: 20px 0;'>", unsafe_allow_html=True)
+    if not ai_client.is_connected or not ai_client.client:
+        return None
     
-    # Progress Steps
-    steps = [
-        ("1", "Profile", st.session_state.current_step >= 1),
-        ("2", "Income", st.session_state.current_step >= 2),
-        ("3", "Deductions", st.session_state.current_step >= 3),
-        ("4", "Review", st.session_state.current_step >= 4),
+    extraction_prompt = f"""Analyze this {doc_type} document and extract ALL financial information.
+The document has had personal information (SSN, names, addresses) removed for privacy.
+
+DOCUMENT TEXT:
+{text}
+
+Extract and return in JSON format:
+{{
+    "document_type": "{doc_type}",
+    "employer_name": "<string or null>",
+    "current_gross_pay": <number or null>,
+    "current_federal_withheld": <number or null>,
+    "current_state_withheld": <number or null>,
+    "current_social_security": <number or null>,
+    "current_medicare": <number or null>,
+    "current_401k": <number or null>,
+    "current_net_pay": <number or null>,
+    "ytd_gross": <number or null>,
+    "ytd_federal_withheld": <number or null>,
+    "ytd_state_withheld": <number or null>,
+    "ytd_social_security": <number or null>,
+    "ytd_medicare": <number or null>,
+    "ytd_401k": <number or null>,
+    "pay_frequency": "<weekly/biweekly/semimonthly/monthly or null>",
+    "pay_period_number": <number or null>,
+    "pay_date": "<date string or null>",
+    "hourly_rate": <number or null>,
+    "hours_worked": <number or null>
+}}
+
+Return ONLY valid JSON."""
+
+    try:
+        response = ai_client.client.chat.completions.create(
+            model=ai_client.model,
+            messages=[
+                {"role": "system", "content": "You are an expert financial document parser. Extract data with high precision. Return valid JSON only."},
+                {"role": "user", "content": extraction_prompt}
+            ]
+        )
+        
+        ai_response = response.choices[0].message.content.strip()
+        
+        # Clean response
+        if "```json" in ai_response:
+            ai_response = ai_response.split("```json")[1].split("```")[0]
+        elif "```" in ai_response:
+            ai_response = ai_response.split("```")[1].split("```")[0]
+        
+        return json.loads(ai_response)
+    except Exception as e:
+        st.error(f"AI extraction error: {e}")
+        return None
+
+
+def generate_top_strategies(tax_result: Dict, gap: float, filing_status: FilingStatus) -> List[Dict]:
+    """Generate top 10 tax strategies ranked by impact using GPT-5.1."""
+    ai_client = get_ai_client()
+    
+    if not ai_client.is_connected or not ai_client.client:
+        # Return mock strategies
+        return get_mock_strategies(tax_result, gap)
+    
+    prompt = f"""Based on this tax situation, provide the TOP 10 tax reduction strategies ranked by HIGHEST IMPACT first.
+
+TAX SITUATION:
+- Gross Income: ${tax_result.get('gross_income', 0):,.2f}
+- Taxable Income: ${tax_result.get('taxable_income', 0):,.2f}
+- Federal Tax Liability: ${tax_result.get('federal_tax', 0):,.2f}
+- Current Tax Gap: ${gap:,.2f} ({'owes money' if gap < 0 else 'refund expected'})
+- Marginal Rate: {tax_result.get('marginal_rate', 0.22) * 100:.0f}%
+- Filing Status: {filing_status.value}
+- Deduction Type: {tax_result.get('deduction_type', 'standard')}
+
+Return exactly 10 strategies as JSON array:
+[
+    {{
+        "rank": 1,
+        "strategy": "Strategy Name",
+        "description": "Brief description of how to implement",
+        "estimated_savings": <dollar amount>,
+        "difficulty": "easy/medium/hard",
+        "deadline": "deadline if applicable or null"
+    }},
+    ...
+]
+
+Strategies should be SPECIFIC and ACTIONABLE with realistic savings estimates.
+Consider: retirement contributions, HSA, business deductions, credits, timing strategies, deduction optimization.
+Return ONLY the JSON array."""
+
+    try:
+        response = ai_client.client.chat.completions.create(
+            model=ai_client.model,
+            messages=[
+                {"role": "system", "content": "You are an expert tax strategist. Provide specific, actionable strategies with accurate savings estimates."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        ai_response = response.choices[0].message.content.strip()
+        
+        if "```json" in ai_response:
+            ai_response = ai_response.split("```json")[1].split("```")[0]
+        elif "```" in ai_response:
+            ai_response = ai_response.split("```")[1].split("```")[0]
+        
+        strategies = json.loads(ai_response)
+        return strategies[:10]  # Ensure max 10
+    except Exception as e:
+        st.warning(f"Using fallback strategies: {e}")
+        return get_mock_strategies(tax_result, gap)
+
+
+def get_mock_strategies(tax_result: Dict, gap: float) -> List[Dict]:
+    """Return mock strategies when AI is unavailable."""
+    marginal = tax_result.get('marginal_rate', 0.22)
+    
+    return [
+        {"rank": 1, "strategy": "Maximize 401(k) Contributions", "description": f"Contribute up to ${CONTRIBUTION_LIMITS_2025['401k']:,} to reduce taxable income", "estimated_savings": CONTRIBUTION_LIMITS_2025['401k'] * marginal, "difficulty": "easy", "deadline": "Dec 31"},
+        {"rank": 2, "strategy": "Open/Max HSA Account", "description": f"Health Savings Account contributions up to ${CONTRIBUTION_LIMITS_2025['hsa_family']:,} (family)", "estimated_savings": CONTRIBUTION_LIMITS_2025['hsa_family'] * marginal, "difficulty": "easy", "deadline": "Apr 15"},
+        {"rank": 3, "strategy": "Traditional IRA Contribution", "description": f"Contribute up to ${CONTRIBUTION_LIMITS_2025['ira']:,} if eligible", "estimated_savings": CONTRIBUTION_LIMITS_2025['ira'] * marginal, "difficulty": "easy", "deadline": "Apr 15"},
+        {"rank": 4, "strategy": "Charitable Donations", "description": "Donate appreciated stock to avoid capital gains and get deduction", "estimated_savings": 5000 * marginal, "difficulty": "medium", "deadline": "Dec 31"},
+        {"rank": 5, "strategy": "Tax-Loss Harvesting", "description": "Sell losing investments to offset gains", "estimated_savings": 3000 * marginal, "difficulty": "medium", "deadline": "Dec 31"},
+        {"rank": 6, "strategy": "Bunch Deductions", "description": "Combine two years of deductions into one to exceed standard deduction", "estimated_savings": 2000, "difficulty": "medium", "deadline": None},
+        {"rank": 7, "strategy": "Home Office Deduction", "description": "If self-employed, deduct home office expenses", "estimated_savings": 1500 * marginal, "difficulty": "medium", "deadline": None},
+        {"rank": 8, "strategy": "Electric Vehicle Credit", "description": "Purchase qualifying EV for up to $7,500 credit", "estimated_savings": 7500, "difficulty": "hard", "deadline": None},
+        {"rank": 9, "strategy": "Energy Efficiency Credits", "description": "Install solar panels, heat pumps, or insulation", "estimated_savings": 3000, "difficulty": "hard", "deadline": None},
+        {"rank": 10, "strategy": "Adjust W-4 Withholding", "description": "Update withholding to better match actual liability", "estimated_savings": abs(gap) * 0.03 if gap > 0 else 0, "difficulty": "easy", "deadline": None},
     ]
+
+
+def analyze_what_if(base_data: Dict, changes_text: str) -> Dict:
+    """Use GPT-5.1 to analyze what-if scenarios based on free-text input."""
+    ai_client = get_ai_client()
     
-    for num, label, completed in steps:
-        active = int(num) == st.session_state.current_step
-        status = "active" if active else ("completed" if completed else "")
-        st.markdown(f"""
-            <div class="progress-step {status}">
-                <div class="step-number">{'✓' if completed and not active else num}</div>
-                {label}
-            </div>
-        """, unsafe_allow_html=True)
+    if not ai_client.is_connected or not ai_client.client:
+        return {"error": "AI connection required for What-If analysis"}
     
-    st.markdown("<hr style='border-color: rgba(255,255,255,0.1); margin: 20px 0;'>", unsafe_allow_html=True)
+    prompt = f"""Analyze how these life changes would affect this person's tax situation.
+
+CURRENT TAX SITUATION (baseline):
+- Gross Income: ${base_data.get('gross_income', 0):,.2f}
+- Federal Tax: ${base_data.get('federal_tax', 0):,.2f}
+- Filing Status: {base_data.get('filing_status', 'single')}
+- Deductions: ${base_data.get('deduction_amount', 0):,.2f}
+
+USER'S PLANNED CHANGES:
+{changes_text}
+
+Analyze the tax impact and return JSON:
+{{
+    "interpreted_changes": [
+        {{"change": "description", "tax_impact": "explanation"}}
+    ],
+    "new_estimated_income": <number>,
+    "new_estimated_tax": <number>,
+    "tax_difference": <number (positive=more tax, negative=less tax)>,
+    "new_credits": [
+        {{"credit": "name", "amount": <number>}}
+    ],
+    "recommendations": ["recommendation 1", "recommendation 2"],
+    "summary": "One paragraph summary of overall impact"
+}}
+
+Be specific with dollar amounts. Return ONLY valid JSON."""
+
+    try:
+        response = ai_client.client.chat.completions.create(
+            model=ai_client.model,
+            messages=[
+                {"role": "system", "content": "You are a tax planning expert. Analyze life changes and their tax implications precisely."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        ai_response = response.choices[0].message.content.strip()
+        
+        if "```json" in ai_response:
+            ai_response = ai_response.split("```json")[1].split("```")[0]
+        elif "```" in ai_response:
+            ai_response = ai_response.split("```")[1].split("```")[0]
+        
+        return json.loads(ai_response)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def process_deduction_input(text: str) -> Dict:
+    """Use GPT-5.1 to parse free-text deduction input."""
+    ai_client = get_ai_client()
     
-    # Quick Profile Settings
-    st.markdown("<p style='color: rgba(255,255,255,0.6); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px;'>Profile Settings</p>", unsafe_allow_html=True)
+    if not ai_client.is_connected or not ai_client.client:
+        return None
     
-    filing = st.selectbox(
-        "Filing Status",
-        options=[s.value for s in FilingStatus],
-        format_func=lambda x: x.replace("_", " ").title(),
-        index=0,
-        key="sidebar_filing"
-    )
-    st.session_state.enhanced_profile.filing_status = FilingStatus(filing)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        age = st.number_input("Your Age", min_value=18, max_value=100, value=35, key="sidebar_age")
-        st.session_state.enhanced_profile.age = age
-    
-    with col2:
-        if filing == "married_filing_jointly":
-            spouse_age = st.number_input("Spouse Age", min_value=18, max_value=100, value=35, key="sidebar_spouse_age")
-            if not st.session_state.enhanced_profile.spouse:
-                st.session_state.enhanced_profile.spouse = SpouseIncome(age=spouse_age)
-            else:
-                st.session_state.enhanced_profile.spouse.age = spouse_age
-        else:
-            st.number_input("Spouse Age", value=0, disabled=True, key="sidebar_spouse_disabled")
-    
-    children = st.number_input("Children (Under 17)", min_value=0, max_value=10, value=0, key="sidebar_children")
-    st.session_state.enhanced_profile.num_children_under_17 = children
-    
-    st.markdown("<hr style='border-color: rgba(255,255,255,0.1); margin: 20px 0;'>", unsafe_allow_html=True)
-    
-    # Calculate Button
-    if st.button("🔄 Calculate Taxes", use_container_width=True, key="sidebar_calc"):
-        with st.spinner("Calculating..."):
-            sync_and_calculate()
-        st.success("Updated!")
-    
-    # Privacy Badge
-    st.markdown("""
-        <div class="privacy-badge">
-            <span class="icon">🔒</span>
-            <span>PII removed before AI processing</span>
-        </div>
-    """, unsafe_allow_html=True)
+    prompt = f"""Parse this free-text description of tax deductions and extract amounts.
+
+USER INPUT:
+{text}
+
+Return JSON with extracted deduction amounts:
+{{
+    "mortgage_interest": <number or 0>,
+    "property_taxes": <number or 0>,
+    "state_local_taxes": <number or 0>,
+    "charitable": <number or 0>,
+    "medical": <number or 0>,
+    "student_loan_interest": <number or 0>,
+    "business_expenses": <number or 0>,
+    "other": <number or 0>,
+    "notes": "any clarifying notes"
+}}
+
+Return ONLY valid JSON."""
+
+    try:
+        response = ai_client.client.chat.completions.create(
+            model=ai_client.model,
+            messages=[
+                {"role": "system", "content": "Extract deduction amounts from natural language. Be precise."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        ai_response = response.choices[0].message.content.strip()
+        
+        if "```json" in ai_response:
+            ai_response = ai_response.split("```json")[1].split("```")[0]
+        elif "```" in ai_response:
+            ai_response = ai_response.split("```")[1].split("```")[0]
+        
+        return json.loads(ai_response)
+    except:
+        return None
 
 
 # =============================================================================
-# MAIN CONTENT AREA
+# MAIN APP HEADER
 # =============================================================================
 
-# Header
 st.markdown("""
-    <div style="background: linear-gradient(135deg, #0077C5 0%, #0097D8 100%); padding: 24px 32px; border-radius: 16px; color: white; margin-bottom: 24px;">
-        <div style="font-size: 1.75rem; font-weight: 700; margin-bottom: 8px;">Federal Tax Estimation 2025</div>
-        <div style="font-size: 1rem; opacity: 0.9;">Get an accurate estimate of your federal taxes with AI-powered optimization</div>
-    </div>
+<div class="main-header">
+    <h1>🛡️ TaxGuard AI</h1>
+    <p>Smart Tax Gap Calculator • Know exactly where you stand</p>
+</div>
 """, unsafe_allow_html=True)
 
-# Calculate if needed
-if st.session_state.tax_result is None:
-    sync_and_calculate()
-
-result = st.session_state.tax_result
-profile = st.session_state.profile
-
-# Main Result Card
-col1, col2, col3 = st.columns([1, 2, 1])
-
-with col2:
-    if result:
-        is_refund = result.refund_or_owed >= 0
-        card_class = "refund" if is_refund else "owed"
-        amount_class = "refund" if is_refund else "owed"
-        label = "Estimated Refund" if is_refund else "Estimated Amount Owed"
-        amount = abs(result.refund_or_owed)
-        
-        st.markdown(f"""
-            <div class="result-card {card_class} animate-fade-in">
-                <div class="result-label">{label}</div>
-                <div class="result-amount {amount_class}">{fmt_currency(amount)}</div>
-                <div style="color: #6B6B6B; font-size: 0.9rem;">
-                    Based on projected annual income of {fmt_currency(result.gross_income)}
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
-
-# Key Metrics Row
-st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.markdown(f"""
-        <div class="metric-card animate-fade-in">
-            <div class="metric-label">Taxable Income</div>
-            <div class="metric-value">{fmt_currency(result.taxable_income)}</div>
-        </div>
-    """, unsafe_allow_html=True)
-
-with col2:
-    st.markdown(f"""
-        <div class="metric-card animate-fade-in">
-            <div class="metric-label">Federal Tax</div>
-            <div class="metric-value">{fmt_currency(result.federal_tax)}</div>
-        </div>
-    """, unsafe_allow_html=True)
-
-with col3:
-    st.markdown(f"""
-        <div class="metric-card animate-fade-in">
-            <div class="metric-label">Effective Rate</div>
-            <div class="metric-value">{result.effective_rate:.1f}%</div>
-        </div>
-    """, unsafe_allow_html=True)
-
-with col4:
-    st.markdown(f"""
-        <div class="metric-card animate-fade-in">
-            <div class="metric-label">Marginal Rate</div>
-            <div class="metric-value">{result.marginal_rate*100:.0f}%</div>
-        </div>
-    """, unsafe_allow_html=True)
-
-st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
+# Privacy Notice (always visible)
+st.markdown("""
+<div class="privacy-notice">
+    <span class="icon">🔒</span>
+    <div>
+        <strong>Privacy Protected</strong> • Your personal information (SSN, name, address) is automatically removed before any AI processing. Only anonymized financial data is analyzed.
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 
 # =============================================================================
-# TABS
+# NAVIGATION TABS
 # =============================================================================
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📊 Summary", 
-    "💼 Income", 
-    "📄 Upload Forms",
-    "🔮 What-If", 
-    "🤖 AI Strategies",
-    "💡 Recommendations",
-    "🔒 Privacy"
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📄 Upload & Extract",
+    "📊 Tax Gap Analysis", 
+    "🎯 Fix It - Strategies",
+    "🔮 What-If Scenarios"
 ])
 
 
 # =============================================================================
-# TAB 1: SUMMARY
+# TAB 1: UPLOAD & EXTRACT
 # =============================================================================
 
 with tab1:
-    col1, col2 = st.columns(2)
+    # Check AI status
+    ai_client = get_ai_client()
     
-    with col1:
-        st.markdown("### 📈 Income Breakdown")
-        
-        income_data = {
-            "Category": ["Gross Income", "Adjustments", "Adjusted Gross Income", 
-                        f"{result.deduction_type.title()} Deduction", "Taxable Income"],
-            "Amount": [
-                fmt_currency(result.gross_income),
-                f"-{fmt_currency(result.adjustments)}",
-                fmt_currency(result.adjusted_gross_income),
-                f"-{fmt_currency(result.deduction_amount)}",
-                fmt_currency(result.taxable_income)
-            ]
-        }
-        st.dataframe(
-            pd.DataFrame(income_data),
-            hide_index=True,
-            use_container_width=True
-        )
-    
-    with col2:
-        st.markdown("### 💰 Tax Breakdown")
-        
-        tax_data = {
-            "Category": ["Federal Income Tax", "Self-Employment Tax", 
-                        "Credits", "Total Tax", "Withholding", "Result"],
-            "Amount": [
-                fmt_currency(result.federal_tax),
-                fmt_currency(result.self_employment_tax),
-                f"-{fmt_currency(result.total_credits)}",
-                fmt_currency(result.total_tax_liability),
-                fmt_currency(result.total_payments_and_withholding),
-                fmt_currency(result.refund_or_owed)
-            ]
-        }
-        st.dataframe(
-            pd.DataFrame(tax_data),
-            hide_index=True,
-            use_container_width=True
-        )
-    
-    # Bracket Breakdown
-    with st.expander("📊 Tax Bracket Breakdown", expanded=False):
-        if result.bracket_breakdown:
-            bracket_data = []
-            for b in result.bracket_breakdown:
-                bracket_data.append({
-                    "Rate": f"{b.rate*100:.0f}%",
-                    "Bracket Range": f"{fmt_currency(b.bracket_start)} - {fmt_currency(b.bracket_end)}",
-                    "Income in Bracket": fmt_currency(b.income_in_bracket),
-                    "Tax": fmt_currency(b.tax_in_bracket)
-                })
-            st.dataframe(pd.DataFrame(bracket_data), hide_index=True, use_container_width=True)
-
-
-# =============================================================================
-# TAB 2: INCOME
-# =============================================================================
-
-with tab2:
-    st.markdown("### 💼 Income Sources")
-    st.markdown("Add all income sources for yourself and your spouse (if married filing jointly)")
-    
-    # Add Income Source Form
-    with st.expander("➕ Add New Income Source", expanded=True):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            source_type = st.selectbox(
-                "Income Type",
-                options=[
-                    ("W-2 (Primary Job)", IncomeSourceType.W2_PRIMARY),
-                    ("W-2 (Spouse)", IncomeSourceType.W2_SPOUSE),
-                    ("W-2 (Second Job)", IncomeSourceType.W2_SECONDARY),
-                    ("1099-NEC (Freelance)", IncomeSourceType.FORM_1099_NEC),
-                    ("Self-Employment", IncomeSourceType.SELF_EMPLOYMENT),
-                    ("Rental Income", IncomeSourceType.RENTAL_INCOME),
-                ],
-                format_func=lambda x: x[0],
-                key="new_source_type"
-            )
-            
-            source_name = st.text_input(
-                "Description (e.g., 'Tech Company' or 'Consulting')",
-                key="new_source_name"
-            )
-        
-        with col2:
-            pay_freq = st.selectbox(
-                "Pay Frequency",
-                options=["weekly", "biweekly", "semimonthly", "monthly"],
-                format_func=lambda x: x.title(),
-                index=1,
-                key="new_pay_freq"
-            )
-            
-            current_period = st.number_input(
-                "Current Pay Period #",
-                min_value=1,
-                max_value=52,
-                value=22,
-                key="new_period"
-            )
-        
-        st.markdown("---")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            ytd_income = st.number_input(
-                "YTD Gross Income",
-                min_value=0.0,
-                value=0.0,
-                step=1000.0,
-                format="%.2f",
-                key="new_ytd_income"
-            )
-        
-        with col2:
-            ytd_federal = st.number_input(
-                "YTD Federal Withheld",
-                min_value=0.0,
-                value=0.0,
-                step=100.0,
-                format="%.2f",
-                key="new_ytd_federal"
-            )
-        
-        with col3:
-            ytd_401k = st.number_input(
-                "YTD 401(k) Contributions",
-                min_value=0.0,
-                value=0.0,
-                step=500.0,
-                format="%.2f",
-                key="new_ytd_401k"
-            )
-        
-        if st.button("➕ Add Income Source", type="primary", key="add_source_btn"):
-            if ytd_income > 0:
-                new_source = IncomeSource(
-                    source_type=source_type[1],
-                    name=source_name or "[Employer]",
-                    pay_frequency=EnhancedPayFrequency(pay_freq),
-                    current_pay_period=current_period,
-                    ytd_gross=ytd_income,
-                    ytd_federal_withheld=ytd_federal,
-                    ytd_401k=ytd_401k,
-                )
-                
-                if source_type[1] == IncomeSourceType.W2_SPOUSE:
-                    if not st.session_state.enhanced_profile.spouse:
-                        st.session_state.enhanced_profile.spouse = SpouseIncome()
-                    st.session_state.enhanced_profile.spouse.sources.append(new_source)
-                else:
-                    st.session_state.enhanced_profile.add_income_source(new_source)
-                
-                sync_and_calculate()
-                st.success(f"✅ Added {source_name or source_type[0]}")
-                st.rerun()
-            else:
-                st.warning("Please enter YTD income greater than $0")
-    
-    # Display Current Income Sources
-    st.markdown("")
-    
-    all_sources = list(st.session_state.enhanced_profile.income_sources)
-    if st.session_state.enhanced_profile.spouse:
-        all_sources.extend(st.session_state.enhanced_profile.spouse.sources)
-    
-    if all_sources:
-        st.markdown(f"**{len(all_sources)} Income Source(s)**")
-        
-        for i, source in enumerate(all_sources):
-            col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
-            
-            with col1:
-                badge_text = source.source_type.value.replace("_", " ").upper()
-                st.markdown(f"🏢 **{badge_text}** - {source.name}")
-            
-            with col2:
-                st.markdown(f"**YTD:** {fmt_currency(source.ytd_gross)}")
-            
-            with col3:
-                st.markdown(f"**Withheld:** {fmt_currency(source.ytd_federal_withheld)}")
-            
-            with col4:
-                st.markdown(f"**Projected:** {fmt_currency(source.projected_annual_income)}")
-            
-            st.markdown("---")
-        
-        # Totals
-        total_ytd = sum(s.ytd_gross for s in all_sources)
-        total_withheld = sum(s.ytd_federal_withheld for s in all_sources)
-        total_projected = sum(s.projected_annual_income for s in all_sources)
-        
-        st.info(f"**Total YTD:** {fmt_currency(total_ytd)} | **Total Withheld:** {fmt_currency(total_withheld)} | **Projected Annual:** {fmt_currency(total_projected)}")
+    if ai_client.is_connected:
+        st.success(f"🟢 **GPT-5.1 Connected** - High-accuracy extraction enabled")
     else:
-        st.info("👆 Add your first income source above to get started!")
-
-
-# =============================================================================
-# TAB 3: UPLOAD TAX FORMS
-# =============================================================================
-
-with tab3:
-    st.markdown("### 📄 Upload Tax Documents")
-    st.markdown("""
-        Upload your W-2, 1099, or other tax forms. TaxGuard AI will:
-        1. **Extract** income and withholding information
-        2. **Remove** all personal information (SSN, names, addresses) before processing
-        3. **Auto-fill** your income sources based on the extracted data
-        
-        💡 **You can upload multiple documents** - all income will be aggregated for tax calculations.
-    """)
-    
-    # Show current income sources count
-    all_sources = list(st.session_state.enhanced_profile.income_sources)
-    if st.session_state.enhanced_profile.spouse:
-        all_sources.extend(st.session_state.enhanced_profile.spouse.sources)
-    
-    if all_sources:
-        total_income = sum(s.ytd_gross for s in all_sources)
-        total_withheld = sum(s.ytd_federal_withheld for s in all_sources)
-        st.success(f"📊 **Current totals from {len(all_sources)} source(s):** YTD Income: {fmt_currency(total_income)} | YTD Withheld: {fmt_currency(total_withheld)}")
+        st.warning("🔴 **AI Offline** - Add `OPENAI_API_KEY` in Streamlit secrets for AI-powered extraction")
     
     st.markdown("---")
     
-    # Document type selector
-    doc_type = st.selectbox(
-        "Document Type",
-        options=[
-            "W-2 (Wage and Tax Statement)",
-            "1099-NEC (Nonemployee Compensation)",
-            "1099-MISC (Miscellaneous Income)",
-            "1099-INT (Interest Income)",
-            "1099-DIV (Dividends)",
-            "1099-B (Broker Transactions)",
-            "1040 (Tax Return - Prior Year)",
-            "Pay Stub",
-            "Other Tax Document"
-        ],
-        key="upload_doc_type"
-    )
+    # Main upload area
+    st.markdown("### Step 1: Upload Your Tax Documents")
+    st.markdown("Upload your paystubs, W-2s, or 1099s. Our AI will extract all the important numbers automatically.")
     
-    # File uploader
-    uploaded_file = st.file_uploader(
-        "Upload your document (PDF or Image)",
-        type=["pdf", "png", "jpg", "jpeg"],
-        help="Supported formats: PDF, PNG, JPG. Max size: 10MB",
-        key="tax_doc_uploader"
-    )
+    col1, col2 = st.columns([2, 1])
     
-    if uploaded_file is not None:
-        st.success(f"✅ Uploaded: {uploaded_file.name} ({uploaded_file.size / 1024:.1f} KB)")
-        
-        st.markdown("---")
-        st.markdown("### ⚙️ Extraction Method")
-        
-        # AI extraction option BEFORE process button
-        use_ai_extraction = st.checkbox(
-            "🤖 **Use AI-Powered Extraction (Recommended)**",
-            value=True if OPENAI_CLIENT_AVAILABLE else False,
-            disabled=not OPENAI_CLIENT_AVAILABLE,
-            help="GPT-5.1 provides more accurate extraction of financial data from documents",
-            key="use_ai_extraction_main"
+    with col1:
+        doc_type = st.selectbox(
+            "Document Type",
+            ["Pay Stub", "W-2", "1099-NEC", "1099-MISC", "1099-INT", "1099-DIV", "Prior Year 1040"],
+            key="doc_type_select"
         )
         
-        if not OPENAI_CLIENT_AVAILABLE:
-            st.warning("⚠️ AI extraction requires OpenAI API key. Using pattern matching instead.")
-        elif use_ai_extraction:
-            st.info("🤖 AI extraction enabled - GPT-5.1 will analyze your document for accurate data extraction")
-        
+        uploaded_file = st.file_uploader(
+            "Drop your file here",
+            type=["pdf", "png", "jpg", "jpeg"],
+            help="Supported: PDF, PNG, JPG",
+            key="main_uploader"
+        )
+    
+    with col2:
+        st.markdown("**Supported Documents:**")
+        st.markdown("""
+        - ✅ Pay Stubs
+        - ✅ W-2 Forms
+        - ✅ 1099 Forms
+        - ✅ Prior Year Returns
+        """)
+    
+    # Process uploaded file
+    if uploaded_file:
         st.markdown("---")
         
-        # Process button
         process_btn = st.button(
-            "🔍 Process Document" + (" with AI" if use_ai_extraction and OPENAI_CLIENT_AVAILABLE else ""),
+            "🚀 Extract with AI" if ai_client.is_connected else "📝 Process Document",
             type="primary",
-            use_container_width=True,
-            key="process_doc_btn"
+            use_container_width=True
         )
         
         if process_btn:
-            # Show privacy pipeline
-            st.info("🛡️ **Privacy Protection Active** - Personal information will be removed before processing")
-            
-            progress = st.progress(0)
-            status = st.empty()
-            
-            # Step 1: Read document
-            status.text("Step 1/5: Reading document...")
-            progress.progress(20)
-            time.sleep(0.3)
-            
-            # Step 2: OCR (if image/PDF)
-            status.text("Step 2/5: Extracting text with OCR...")
-            progress.progress(40)
-            
-            # Read file content
-            file_content = uploaded_file.read()
-            extracted_text = ""
-            
-            try:
-                if uploaded_file.type == "application/pdf":
-                    try:
-                        import pdfplumber
-                        import io
-                        with pdfplumber.open(io.BytesIO(file_content)) as pdf:
-                            for page in pdf.pages:
-                                extracted_text += page.extract_text() or ""
-                    except ImportError:
-                        st.warning("PDF processing requires pdfplumber.")
-                        extracted_text = "[PDF content - install pdfplumber for extraction]"
-                else:
-                    try:
-                        from PIL import Image
-                        import pytesseract
-                        import io
-                        image = Image.open(io.BytesIO(file_content))
-                        extracted_text = pytesseract.image_to_string(image)
-                    except ImportError:
-                        st.warning("Image OCR requires pytesseract.")
-                        extracted_text = "[Image content - install pytesseract for extraction]"
-                    except Exception as e:
-                        st.warning(f"OCR error: {e}")
-                        extracted_text = "[Could not extract text from image]"
-            except Exception as e:
-                st.error(f"Error reading document: {e}")
+            with st.spinner("Processing document..."):
+                # Step 1: Read and OCR
+                progress = st.progress(0, "Reading document...")
+                file_content = uploaded_file.read()
+                
                 extracted_text = ""
-            
-            time.sleep(0.3)
-            
-            # Step 3: PII Redaction
-            status.text("Step 3/5: Removing personal information (SSN, names, addresses)...")
-            progress.progress(60)
-            
-            if extracted_text and extracted_text[0] != "[":
-                redactor = PIIRedactor(use_ner=False)
-                redaction_result = redactor.redact_sensitive_data(extracted_text)
-                redacted_text = redaction_result.redacted_text
-                pii_count = redaction_result.redaction_count
-                pii_types = redaction_result.pii_types_found
-            else:
-                redacted_text = extracted_text
-                pii_count = 0
-                pii_types = []
-            
-            time.sleep(0.3)
-            
-            # Step 4: Extract financial data
-            detected_data = {}
-            
-            if use_ai_extraction and OPENAI_CLIENT_AVAILABLE and redacted_text and redacted_text[0] != "[":
-                # AI-powered extraction
-                status.text("Step 4/5: AI analyzing document for financial data...")
-                progress.progress(80)
-                
-                ai_client = get_ai_client()
-                
-                extraction_prompt = f"""Analyze this redacted paystub/tax document and extract ALL financial information.
-The document has had personal information (SSN, names, addresses) removed for privacy.
-
-DOCUMENT TEXT:
-{redacted_text}
-
-Extract and return these values in JSON format. Use null if not found. Look carefully for YTD (year-to-date) values:
-{{
-    "current_gross_pay": <number or null>,
-    "current_federal_tax_withheld": <number or null>,
-    "current_state_tax_withheld": <number or null>,
-    "current_social_security_tax": <number or null>,
-    "current_medicare_tax": <number or null>,
-    "current_401k_contribution": <number or null>,
-    "current_net_pay": <number or null>,
-    "ytd_gross_pay": <number or null>,
-    "ytd_federal_tax_withheld": <number or null>,
-    "ytd_state_tax_withheld": <number or null>,
-    "ytd_social_security_tax": <number or null>,
-    "ytd_medicare_tax": <number or null>,
-    "ytd_401k_contribution": <number or null>,
-    "pay_frequency": "<weekly/biweekly/semimonthly/monthly or null>",
-    "pay_period_number": <number or null>,
-    "employer_name": "<string or null>"
-}}
-
-IMPORTANT: Look for labels like "Federal Tax", "Fed Tax", "FIT", "Fed W/H", "Federal Withholding" for federal tax amounts.
-Look for "YTD", "Year to Date", "Y-T-D" prefixes for year-to-date amounts.
-Return ONLY valid JSON, no other text."""
-
                 try:
-                    response = ai_client.client.chat.completions.create(
-                        model=ai_client.model,
-                        messages=[
-                            {"role": "system", "content": "You are an expert financial document parser. Extract data accurately and return valid JSON only."},
-                            {"role": "user", "content": extraction_prompt}
-                        ]
-                    )
-                    
-                    ai_response = response.choices[0].message.content.strip()
-                    
-                    # Clean up response
-                    if "```json" in ai_response:
-                        ai_response = ai_response.split("```json")[1].split("```")[0]
-                    elif "```" in ai_response:
-                        ai_response = ai_response.split("```")[1].split("```")[0]
-                    
-                    import json as json_module
-                    ai_data = json_module.loads(ai_response)
-                    
-                    # Map AI results to detected_data
-                    if ai_data.get("current_gross_pay"): detected_data["Current Gross Pay"] = ai_data["current_gross_pay"]
-                    if ai_data.get("current_federal_tax_withheld"): detected_data["Current Federal Tax"] = ai_data["current_federal_tax_withheld"]
-                    if ai_data.get("current_state_tax_withheld"): detected_data["Current State Tax"] = ai_data["current_state_tax_withheld"]
-                    if ai_data.get("current_social_security_tax"): detected_data["Current SS Tax"] = ai_data["current_social_security_tax"]
-                    if ai_data.get("current_medicare_tax"): detected_data["Current Medicare Tax"] = ai_data["current_medicare_tax"]
-                    if ai_data.get("current_401k_contribution"): detected_data["Current 401(k)"] = ai_data["current_401k_contribution"]
-                    if ai_data.get("current_net_pay"): detected_data["Current Net Pay"] = ai_data["current_net_pay"]
-                    if ai_data.get("ytd_gross_pay"): detected_data["YTD Gross"] = ai_data["ytd_gross_pay"]
-                    if ai_data.get("ytd_federal_tax_withheld"): detected_data["YTD Federal Tax"] = ai_data["ytd_federal_tax_withheld"]
-                    if ai_data.get("ytd_state_tax_withheld"): detected_data["YTD State Tax"] = ai_data["ytd_state_tax_withheld"]
-                    if ai_data.get("ytd_social_security_tax"): detected_data["YTD SS Tax"] = ai_data["ytd_social_security_tax"]
-                    if ai_data.get("ytd_medicare_tax"): detected_data["YTD Medicare Tax"] = ai_data["ytd_medicare_tax"]
-                    if ai_data.get("ytd_401k_contribution"): detected_data["YTD 401(k)"] = ai_data["ytd_401k_contribution"]
-                    
-                    # Store extracted metadata
-                    if ai_data.get("pay_frequency"):
-                        st.session_state['detected_pay_frequency'] = ai_data["pay_frequency"]
-                    if ai_data.get("pay_period_number"):
-                        st.session_state['detected_pay_period'] = ai_data["pay_period_number"]
-                    if ai_data.get("employer_name"):
-                        st.session_state['detected_employer'] = ai_data["employer_name"]
-                    
-                except Exception as e:
-                    st.warning(f"AI extraction encountered an issue: {e}. Falling back to pattern matching.")
-                    use_ai_extraction = False  # Fall back to pattern matching
-            
-            # Pattern matching (fallback or primary if AI not used)
-            if not use_ai_extraction or not detected_data:
-                status.text("Step 4/5: Extracting financial data with pattern matching...")
-                progress.progress(80)
-                
-                import re
-                
-                def find_amount_near_keyword(text, keywords, search_range=100):
-                    text_lower = text.lower()
-                    for keyword in keywords:
-                        pos = text_lower.find(keyword.lower())
-                        if pos != -1:
-                            start = max(0, pos - 20)
-                            end = min(len(text), pos + search_range)
-                            snippet = text[start:end]
-                            amounts = re.findall(r'\$?\s*([\d,]+\.?\d{0,2})', snippet)
-                            for amt in amounts:
-                                try:
-                                    value = float(amt.replace(",", ""))
-                                    if value > 0:
-                                        return value
-                                except:
-                                    pass
-                    return None
-                
-                # Keyword lists
-                gross_kw = ["gross pay", "gross earnings", "gross income", "total gross", "gross wages", "total earnings"]
-                ytd_gross_kw = ["ytd gross", "ytd earnings", "ytd total", "year to date gross", "ytd wages", "gross ytd"]
-                fed_kw = ["federal tax", "fed tax", "federal w/h", "fed w/h", "federal withholding", "fit", "fed inc tax", "federal withheld"]
-                ytd_fed_kw = ["ytd federal", "ytd fed", "federal ytd", "fed ytd", "ytd fit", "ytd fed tax"]
-                ret_kw = ["401k", "401(k)", "retirement", "403b", "def comp", "deferred"]
-                ytd_ret_kw = ["ytd 401k", "ytd 401(k)", "401k ytd", "ytd retirement"]
-                
-                if redacted_text:
-                    v = find_amount_near_keyword(redacted_text, gross_kw)
-                    if v: detected_data["Current Gross Pay"] = v
-                    v = find_amount_near_keyword(redacted_text, ytd_gross_kw)
-                    if v: detected_data["YTD Gross"] = v
-                    v = find_amount_near_keyword(redacted_text, fed_kw)
-                    if v: detected_data["Current Federal Tax"] = v
-                    v = find_amount_near_keyword(redacted_text, ytd_fed_kw)
-                    if v: detected_data["YTD Federal Tax"] = v
-                    v = find_amount_near_keyword(redacted_text, ret_kw)
-                    if v: detected_data["Current 401(k)"] = v
-                    v = find_amount_near_keyword(redacted_text, ytd_ret_kw)
-                    if v: detected_data["YTD 401(k)"] = v
-            
-            # Step 5: Complete
-            status.text("Step 5/5: Extraction complete!")
-            progress.progress(100)
-            time.sleep(0.3)
-            
-            progress.empty()
-            status.empty()
-            
-            # Show privacy confirmation
-            if pii_count > 0:
-                st.success(f"🛡️ **Privacy Protected**: Removed {pii_count} personal information items")
-                with st.expander("View PII types removed"):
-                    for pii_type in pii_types:
-                        st.markdown(f"- 🚫 {pii_type}")
-            
-            # Display results
-            st.markdown("---")
-            st.markdown("### 📊 Extraction Results")
-            
-            if use_ai_extraction and OPENAI_CLIENT_AVAILABLE:
-                st.info("🤖 **Extracted using AI (GPT-5.1)**")
-            else:
-                st.info("📝 **Extracted using pattern matching**")
-            
-            # Show document preview
-            with st.expander("📄 View Document Text (Redacted)", expanded=False):
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**Original (contains PII)**")
-                    st.text_area("Original", value=extracted_text[:1000] if extracted_text else "No text", height=150, disabled=True, key="orig_preview", label_visibility="collapsed")
-                with col2:
-                    st.markdown("**After PII Removal (Safe)**")
-                    st.text_area("Redacted", value=redacted_text[:1000] if redacted_text else "No text", height=150, disabled=True, key="redact_preview", label_visibility="collapsed")
-            
-            # Display detected data
-            if detected_data:
-                st.markdown("**💰 Detected Financial Information:**")
-                
-                current_items = {k: v for k, v in detected_data.items() if "Current" in k}
-                ytd_items = {k: v for k, v in detected_data.items() if "YTD" in k}
-                
-                col_c, col_y = st.columns(2)
-                
-                with col_c:
-                    if current_items:
-                        st.markdown("**Current Period:**")
-                        for label, value in current_items.items():
-                            st.markdown(f"- {label}: **{fmt_currency(value)}**")
-                
-                with col_y:
-                    if ytd_items:
-                        st.markdown("**Year-to-Date:**")
-                        for label, value in ytd_items.items():
-                            st.markdown(f"- {label}: **{fmt_currency(value)}**")
-                
-                st.markdown("---")
-                st.markdown("### ➕ Add to Income Sources")
-                st.markdown("*Review and adjust values, then click Add. This will be combined with any existing income sources.*")
-                
-                add_col1, add_col2 = st.columns(2)
-                
-                with add_col1:
-                    auto_income = detected_data.get("YTD Gross", detected_data.get("Current Gross Pay", 0))
-                    auto_withheld = detected_data.get("YTD Federal Tax", detected_data.get("Current Federal Tax", 0))
-                    auto_401k = detected_data.get("YTD 401(k)", detected_data.get("Current 401(k)", 0))
-                    
-                    final_income = st.number_input("YTD Gross Income", value=float(auto_income), key="auto_ytd_income", format="%.2f")
-                    final_withheld = st.number_input("YTD Federal Tax Withheld", value=float(auto_withheld), key="auto_ytd_withheld", format="%.2f")
-                    final_401k = st.number_input("YTD 401(k) Contributions", value=float(auto_401k), key="auto_ytd_401k", format="%.2f")
-                
-                with add_col2:
-                    default_employer = st.session_state.get('detected_employer', '[From uploaded document]')
-                    source_name = st.text_input("Employer/Source Name", value=default_employer, key="auto_source_name")
-                    
-                    freq_options = ["biweekly", "weekly", "semimonthly", "monthly"]
-                    default_freq = st.session_state.get('detected_pay_frequency', 'biweekly')
-                    if default_freq not in freq_options:
-                        default_freq = 'biweekly'
-                    
-                    pay_freq = st.selectbox("Pay Frequency", options=freq_options, index=freq_options.index(default_freq), format_func=lambda x: x.title(), key="auto_pay_freq")
-                    
-                    default_period = st.session_state.get('detected_pay_period', 22)
-                    current_period = st.number_input("Current Pay Period #", min_value=1, max_value=52, value=int(default_period) if default_period else 22, key="auto_pay_period")
-                    
-                    # Determine source type based on document type
-                    if "W-2" in doc_type or "Pay Stub" in doc_type:
-                        source_type = IncomeSourceType.W2_PRIMARY
-                    elif "1099-NEC" in doc_type:
-                        source_type = IncomeSourceType.FORM_1099_NEC
-                    elif "1099" in doc_type:
-                        source_type = IncomeSourceType.FORM_1099_NEC
+                    if uploaded_file.type == "application/pdf":
+                        try:
+                            import pdfplumber
+                            import io
+                            with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+                                for page in pdf.pages:
+                                    extracted_text += page.extract_text() or ""
+                        except ImportError:
+                            st.error("PDF processing requires pdfplumber package")
                     else:
-                        source_type = IncomeSourceType.W2_PRIMARY
+                        try:
+                            from PIL import Image
+                            import pytesseract
+                            import io
+                            image = Image.open(io.BytesIO(file_content))
+                            extracted_text = pytesseract.image_to_string(image)
+                        except ImportError:
+                            st.error("Image OCR requires pytesseract package")
+                except Exception as e:
+                    st.error(f"Error reading document: {e}")
+                
+                progress.progress(30, "Removing personal information...")
+                
+                # Step 2: PII Redaction
+                if extracted_text:
+                    redactor = PIIRedactor(use_ner=False)
+                    redaction_result = redactor.redact_sensitive_data(extracted_text)
+                    redacted_text = redaction_result.redacted_text
+                    pii_count = redaction_result.redaction_count
                     
-                    if st.button("➕ Add Income Source", type="primary", key="auto_add_source", use_container_width=True):
-                        new_source = IncomeSource(
-                            source_type=source_type,
-                            name=source_name,
-                            pay_frequency=EnhancedPayFrequency(pay_freq),
-                            current_pay_period=current_period,
-                            ytd_gross=final_income,
-                            ytd_federal_withheld=final_withheld,
-                            ytd_401k=final_401k,
-                        )
-                        st.session_state.enhanced_profile.add_income_source(new_source)
-                        sync_and_calculate()
-                        st.success(f"✅ Added! Total income sources: {len(st.session_state.enhanced_profile.income_sources)}")
-                        st.balloons()
-                        time.sleep(1)
-                        st.rerun()
-            else:
-                st.warning("Could not automatically detect financial information.")
-                st.markdown("### Manual Entry")
+                    if pii_count > 0:
+                        st.info(f"🛡️ Removed {pii_count} personal information items before processing")
                 
-                man_col1, man_col2 = st.columns(2)
-                with man_col1:
-                    manual_income = st.number_input("YTD Gross Income", value=0.0, key="manual_income", format="%.2f")
-                    manual_withheld = st.number_input("YTD Federal Withheld", value=0.0, key="manual_withheld", format="%.2f")
-                    manual_401k = st.number_input("YTD 401(k)", value=0.0, key="manual_401k", format="%.2f")
+                progress.progress(60, "Extracting financial data with AI...")
                 
-                with man_col2:
-                    manual_name = st.text_input("Employer Name", key="manual_name")
-                    if st.button("➕ Add Manually", type="primary", key="manual_add"):
-                        if manual_income > 0:
-                            new_source = IncomeSource(
-                                source_type=IncomeSourceType.W2_PRIMARY,
-                                name=manual_name or "[Manual Entry]",
-                                pay_frequency=EnhancedPayFrequency.BIWEEKLY,
-                                current_pay_period=22,
-                                ytd_gross=manual_income,
-                                ytd_federal_withheld=manual_withheld,
-                                ytd_401k=manual_401k,
-                            )
-                            st.session_state.enhanced_profile.add_income_source(new_source)
-                            sync_and_calculate()
-                            st.success("✅ Added!")
-                            st.rerun()
-    
-    # Show summary of all income sources
-    st.markdown("---")
-    st.markdown("### 📋 All Income Sources")
-    
-    all_sources = list(st.session_state.enhanced_profile.income_sources)
-    if st.session_state.enhanced_profile.spouse:
-        all_sources.extend(st.session_state.enhanced_profile.spouse.sources)
-    
-    if all_sources:
-        for i, src in enumerate(all_sources):
-            col1, col2, col3 = st.columns([2, 1, 1])
+                # Step 3: AI Extraction
+                extracted_data = None
+                if ai_client.is_connected and extracted_text:
+                    extracted_data = extract_with_ai(redacted_text, doc_type)
+                
+                progress.progress(100, "Complete!")
+                time.sleep(0.3)
+                progress.empty()
+                
+                if extracted_data:
+                    st.session_state.extracted_data = extracted_data
+                    st.success("✅ Data extracted successfully!")
+                else:
+                    st.warning("Could not auto-extract data. Please enter manually below.")
+        
+        # Show extracted data
+        if st.session_state.extracted_data:
+            st.markdown("### 📊 Extracted Data")
+            
+            data = st.session_state.extracted_data
+            
+            col1, col2 = st.columns(2)
+            
             with col1:
-                st.markdown(f"**{i+1}. {src.name}** ({src.source_type.value.replace('_', ' ').title()})")
+                st.markdown("**Current Period:**")
+                st.markdown(f"- Gross Pay: **{fmt_currency(data.get('current_gross_pay', 0) or 0)}**")
+                st.markdown(f"- Federal Withheld: **{fmt_currency(data.get('current_federal_withheld', 0) or 0)}**")
+                st.markdown(f"- 401(k): **{fmt_currency(data.get('current_401k', 0) or 0)}**")
+            
             with col2:
-                st.markdown(f"Income: {fmt_currency(src.ytd_gross)}")
-            with col3:
-                st.markdown(f"Withheld: {fmt_currency(src.ytd_federal_withheld)}")
-        
+                st.markdown("**Year-to-Date:**")
+                st.markdown(f"- YTD Gross: **{fmt_currency(data.get('ytd_gross', 0) or 0)}**")
+                st.markdown(f"- YTD Federal Withheld: **{fmt_currency(data.get('ytd_federal_withheld', 0) or 0)}**")
+                st.markdown(f"- YTD 401(k): **{fmt_currency(data.get('ytd_401k', 0) or 0)}**")
+            
+            # Add to sources button
+            if st.button("➕ Add This Income Source", type="primary"):
+                pay_freq = data.get('pay_frequency', 'biweekly') or 'biweekly'
+                periods = {'weekly': 52, 'biweekly': 26, 'semimonthly': 24, 'monthly': 12}.get(pay_freq, 26)
+                current_period = data.get('pay_period_number', 24) or 24
+                ytd_gross = data.get('ytd_gross', 0) or 0
+                
+                new_source = {
+                    'name': data.get('employer_name', f'Source {len(st.session_state.income_sources) + 1}') or f'Source {len(st.session_state.income_sources) + 1}',
+                    'doc_type': doc_type,
+                    'ytd_gross': ytd_gross,
+                    'ytd_federal_withheld': data.get('ytd_federal_withheld', 0) or 0,
+                    'ytd_401k': data.get('ytd_401k', 0) or 0,
+                    'pay_frequency': pay_freq,
+                    'current_pay_period': current_period,
+                    'periods_per_year': periods,
+                    'projected_annual_income': (ytd_gross / current_period * periods) if current_period > 0 else ytd_gross
+                }
+                
+                st.session_state.income_sources.append(new_source)
+                st.session_state.extracted_data = None
+                st.success(f"✅ Added! You now have {len(st.session_state.income_sources)} income source(s).")
+                st.rerun()
+    
+    # Show current income sources
+    if st.session_state.income_sources:
         st.markdown("---")
-        total_income = sum(s.ytd_gross for s in all_sources)
-        total_withheld = sum(s.ytd_federal_withheld for s in all_sources)
-        total_401k = sum(s.ytd_401k for s in all_sources)
+        st.markdown("### 📋 Your Income Sources")
         
-        st.success(f"""
-        **📊 Totals (All Sources Combined):**
-        - Total YTD Income: **{fmt_currency(total_income)}**
-        - Total Federal Withheld: **{fmt_currency(total_withheld)}**
-        - Total 401(k): **{fmt_currency(total_401k)}**
+        total_income = sum(s['projected_annual_income'] for s in st.session_state.income_sources)
+        total_withheld = sum(s['ytd_federal_withheld'] for s in st.session_state.income_sources)
         
-        *These totals will be used for AI tax strategy recommendations.*
-        """)
-    else:
-        st.info("No income sources added yet. Upload a document above or use the Income tab to add manually.")
+        for i, src in enumerate(st.session_state.income_sources):
+            col1, col2, col3 = st.columns([3, 2, 1])
+            with col1:
+                st.markdown(f"**{i+1}. {src['name']}** ({src['doc_type']})")
+            with col2:
+                st.markdown(f"Projected: {fmt_currency(src['projected_annual_income'])}")
+            with col3:
+                if st.button("🗑️", key=f"del_{i}"):
+                    st.session_state.income_sources.pop(i)
+                    st.rerun()
+        
+        st.markdown(f"**Total Projected Income: {fmt_currency(total_income)}**")
+        st.markdown(f"**Total YTD Withheld: {fmt_currency(total_withheld)}**")
+    
+    # Manual entry (collapsed by default)
+    st.markdown("---")
+    with st.expander("📝 Manual Entry (if not uploading documents)", expanded=not bool(st.session_state.income_sources)):
+        st.markdown("Enter your income information manually:")
+        
+        man_col1, man_col2 = st.columns(2)
+        
+        with man_col1:
+            man_name = st.text_input("Employer/Source Name", key="man_name")
+            man_ytd_gross = st.number_input("YTD Gross Income", min_value=0.0, key="man_gross")
+            man_ytd_withheld = st.number_input("YTD Federal Tax Withheld", min_value=0.0, key="man_withheld")
+        
+        with man_col2:
+            man_ytd_401k = st.number_input("YTD 401(k) Contributions", min_value=0.0, key="man_401k")
+            man_pay_freq = st.selectbox("Pay Frequency", ["biweekly", "weekly", "semimonthly", "monthly"], key="man_freq")
+            man_period = st.number_input("Current Pay Period #", min_value=1, max_value=52, value=24, key="man_period")
+        
+        if st.button("➕ Add Manual Entry", key="add_manual"):
+            if man_ytd_gross > 0:
+                periods = {'weekly': 52, 'biweekly': 26, 'semimonthly': 24, 'monthly': 12}.get(man_pay_freq, 26)
+                
+                st.session_state.income_sources.append({
+                    'name': man_name or f'Source {len(st.session_state.income_sources) + 1}',
+                    'doc_type': 'Manual Entry',
+                    'ytd_gross': man_ytd_gross,
+                    'ytd_federal_withheld': man_ytd_withheld,
+                    'ytd_401k': man_ytd_401k,
+                    'pay_frequency': man_pay_freq,
+                    'current_pay_period': man_period,
+                    'periods_per_year': periods,
+                    'projected_annual_income': (man_ytd_gross / man_period * periods) if man_period > 0 else man_ytd_gross
+                })
+                st.success("✅ Added!")
+                st.rerun()
 
 
 # =============================================================================
-# TAB 4: WHAT-IF SIMULATOR
+# TAB 2: TAX GAP ANALYSIS
+# =============================================================================
+
+with tab2:
+    if not st.session_state.income_sources:
+        st.warning("⬅️ Please add income sources in the **Upload & Extract** tab first.")
+    else:
+        st.markdown("### Your Tax Gap Analysis")
+        st.markdown("See if you're on track for a refund or if you'll owe money.")
+        
+        # Filing status
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            filing_status = st.selectbox(
+                "Filing Status",
+                options=[fs for fs in FilingStatus],
+                format_func=lambda x: x.value.replace('_', ' ').title(),
+                key="filing_status_select"
+            )
+            st.session_state.filing_status = filing_status
+        
+        st.markdown("---")
+        
+        # Deductions Section
+        st.markdown("### Step 1: Your Deductions")
+        st.markdown("*Our AI will determine if Standard or Itemized is better for you*")
+        
+        # Free-text deduction input
+        deduction_text = st.text_area(
+            "Describe your deductions in plain English:",
+            placeholder="Example: I paid about $15,000 in mortgage interest, $5,000 in property taxes, and donated $3,000 to charity. I also had $2,000 in medical expenses.",
+            key="deduction_freetext",
+            height=100
+        )
+        
+        if deduction_text and st.button("🤖 Parse Deductions with AI", key="parse_deductions"):
+            parsed = process_deduction_input(deduction_text)
+            if parsed:
+                st.session_state.deductions.update(parsed)
+                st.success("✅ Deductions parsed!")
+                st.rerun()
+        
+        # Manual deduction fields (collapsed)
+        with st.expander("📝 Or enter deductions manually"):
+            ded_col1, ded_col2 = st.columns(2)
+            
+            with ded_col1:
+                st.session_state.deductions['mortgage_interest'] = st.number_input(
+                    "Mortgage Interest", value=float(st.session_state.deductions.get('mortgage_interest', 0)), key="ded_mortgage"
+                )
+                st.session_state.deductions['property_taxes'] = st.number_input(
+                    "Property Taxes", value=float(st.session_state.deductions.get('property_taxes', 0)), key="ded_property"
+                )
+                st.session_state.deductions['state_local_taxes'] = st.number_input(
+                    "State/Local Taxes", value=float(st.session_state.deductions.get('state_local_taxes', 0)), key="ded_salt"
+                )
+            
+            with ded_col2:
+                st.session_state.deductions['charitable'] = st.number_input(
+                    "Charitable Donations", value=float(st.session_state.deductions.get('charitable', 0)), key="ded_charity"
+                )
+                st.session_state.deductions['medical'] = st.number_input(
+                    "Medical Expenses", value=float(st.session_state.deductions.get('medical', 0)), key="ded_medical"
+                )
+                st.session_state.deductions['other'] = st.number_input(
+                    "Other Deductions", value=float(st.session_state.deductions.get('other', 0)), key="ded_other"
+                )
+        
+        st.markdown("---")
+        
+        # Calculate button
+        if st.button("📊 Calculate My Tax Gap", type="primary", use_container_width=True, key="calc_gap"):
+            with st.spinner("Calculating..."):
+                # Step A: Projected withholding
+                projected_withholding = calculate_projected_withholding(st.session_state.income_sources)
+                
+                # Step B: True liability
+                tax_result = calculate_true_liability(
+                    st.session_state.income_sources,
+                    st.session_state.deductions,
+                    st.session_state.filing_status
+                )
+                
+                # Tax Gap
+                tax_gap = projected_withholding - tax_result['federal_tax']
+                
+                st.session_state.tax_result = tax_result
+                st.session_state.tax_gap = tax_gap
+                st.session_state.projected_withholding = projected_withholding
+        
+        # Display results
+        if st.session_state.tax_result and st.session_state.tax_gap is not None:
+            st.markdown("---")
+            st.markdown("### 📊 Results")
+            
+            tax_result = st.session_state.tax_result
+            tax_gap = st.session_state.tax_gap
+            projected_withholding = st.session_state.projected_withholding
+            
+            # Tax Gap Display
+            if tax_gap >= 0:
+                st.markdown(f"""
+                <div class="tax-gap-positive">
+                    <div>Expected Refund</div>
+                    <div class="tax-gap-amount">{fmt_currency(tax_gap)}</div>
+                    <div>You're on track to get money back! 🎉</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="tax-gap-negative">
+                    <div>Amount You'll Owe</div>
+                    <div class="tax-gap-amount">{fmt_currency(abs(tax_gap))}</div>
+                    <div>Check the "Fix It" tab for strategies to reduce this ⚠️</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("---")
+            
+            # Breakdown
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Step A: Your Withholding**")
+                st.markdown(f"- Projected Year-End Withholding: **{fmt_currency(projected_withholding)}**")
+            
+            with col2:
+                st.markdown("**Step B: True Tax Liability**")
+                st.markdown(f"- Gross Income: {fmt_currency(tax_result['gross_income'])}")
+                st.markdown(f"- Deduction ({tax_result['deduction_type'].title()}): -{fmt_currency(tax_result['deduction_amount'])}")
+                st.markdown(f"- Taxable Income: {fmt_currency(tax_result['taxable_income'])}")
+                st.markdown(f"- **Federal Tax: {fmt_currency(tax_result['federal_tax'])}**")
+            
+            # Deduction comparison
+            st.markdown("---")
+            st.markdown("**🔍 Deduction Analysis**")
+            
+            std = tax_result['standard_deduction']
+            itemized = tax_result['itemized_deduction']
+            
+            if itemized > std:
+                st.success(f"✅ **Itemized deductions ({fmt_currency(itemized)})** save you more than Standard ({fmt_currency(std)})")
+            else:
+                st.info(f"📋 **Standard deduction ({fmt_currency(std)})** is better for you (Itemized would be {fmt_currency(itemized)})")
+
+
+# =============================================================================
+# TAB 3: FIX IT - STRATEGIES
+# =============================================================================
+
+with tab3:
+    if not st.session_state.tax_result:
+        st.warning("⬅️ Please complete the **Tax Gap Analysis** first.")
+    else:
+        tax_gap = st.session_state.tax_gap
+        tax_result = st.session_state.tax_result
+        
+        if tax_gap >= 0:
+            st.markdown("### 🎯 Maximize Your Refund")
+            st.success(f"You're expecting a **{fmt_currency(tax_gap)}** refund. Here's how to make it even bigger!")
+        else:
+            st.markdown("### 🎯 Reduce What You Owe")
+            st.error(f"You owe **{fmt_currency(abs(tax_gap))}**. Here are strategies to reduce this:")
+        
+        # Generate strategies button
+        if st.button("🚀 Generate Top 10 Strategies", type="primary", use_container_width=True):
+            with st.spinner("AI is analyzing your situation..."):
+                strategies = generate_top_strategies(
+                    tax_result, 
+                    tax_gap, 
+                    st.session_state.filing_status
+                )
+                st.session_state.strategies = strategies
+        
+        # Display strategies
+        if st.session_state.strategies:
+            st.markdown("---")
+            st.markdown("### Top 10 Strategies (Ranked by Impact)")
+            
+            for strat in st.session_state.strategies:
+                rank = strat.get('rank', 0)
+                savings = strat.get('estimated_savings', 0)
+                difficulty = strat.get('difficulty', 'medium')
+                deadline = strat.get('deadline')
+                
+                difficulty_emoji = {'easy': '🟢', 'medium': '🟡', 'hard': '🔴'}.get(difficulty, '🟡')
+                
+                with st.container():
+                    col1, col2 = st.columns([4, 1])
+                    
+                    with col1:
+                        st.markdown(f"""
+                        **#{rank} {strat.get('strategy', 'Strategy')}** {difficulty_emoji}
+                        
+                        {strat.get('description', '')}
+                        
+                        {f"⏰ Deadline: {deadline}" if deadline else ""}
+                        """)
+                    
+                    with col2:
+                        st.markdown(f"""
+                        <div style="text-align: right;">
+                            <div style="color: #14A66B; font-size: 1.5rem; font-weight: bold;">
+                                {fmt_currency(savings)}
+                            </div>
+                            <div style="color: #666; font-size: 0.8rem;">potential savings</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    st.markdown("---")
+            
+            # Total potential savings
+            total_savings = sum(s.get('estimated_savings', 0) for s in st.session_state.strategies)
+            st.success(f"💰 **Total Potential Savings: {fmt_currency(total_savings)}**")
+
+
+# =============================================================================
+# TAB 4: WHAT-IF SCENARIOS
 # =============================================================================
 
 with tab4:
-    st.markdown("### 🔮 What-If Tax Simulator")
-    st.markdown("See how different scenarios could affect your tax outcome")
+    st.markdown("### 🔮 What-If Tax Scenarios")
+    st.markdown("Plan for the future by seeing how life changes would affect your taxes.")
     
-    simulator = TaxSimulator(profile)
+    ai_client = get_ai_client()
     
-    # Quick Scenarios
-    st.markdown("**Quick Scenarios**")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        if st.button("Max 401(k)", use_container_width=True, key="sim_401k"):
-            sim = simulator.find_optimal_401k()
-            st.session_state.simulations.insert(0, sim)
-    
-    with col2:
-        if st.button("Max HSA", use_container_width=True, key="sim_hsa"):
-            sim = simulator.find_optimal_hsa()
-            st.session_state.simulations.insert(0, sim)
-    
-    with col3:
-        if st.button("Max Both", use_container_width=True, key="sim_both"):
-            changes = {}
-            if profile.remaining_401k_room > 0:
-                changes["extra_401k_traditional"] = profile.remaining_401k_room
-            if profile.remaining_hsa_room > 0:
-                changes["extra_hsa"] = profile.remaining_hsa_room
-            if changes:
-                sim = simulator.run_simulation(changes, "Max 401(k) + HSA")
-                st.session_state.simulations.insert(0, sim)
-    
-    with col4:
-        if st.button("Clear All", use_container_width=True, key="sim_clear"):
-            st.session_state.simulations = []
-    
-    st.markdown("---")
-    
-    # Custom Simulation
-    st.markdown("**Custom Simulation**")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        add_401k = st.number_input(
-            f"Additional 401(k) (Room: {fmt_currency(profile.remaining_401k_room)})",
-            min_value=0.0,
-            max_value=float(max(0, profile.remaining_401k_room)),
-            value=0.0,
-            step=500.0,
-            key="custom_401k"
-        )
-    
-    with col2:
-        add_hsa = st.number_input(
-            f"Additional HSA (Room: {fmt_currency(profile.remaining_hsa_room)})",
-            min_value=0.0,
-            max_value=float(max(0, profile.remaining_hsa_room)),
-            value=0.0,
-            step=100.0,
-            key="custom_hsa"
-        )
-    
-    with col3:
-        add_ira = st.number_input(
-            "Additional Traditional IRA",
-            min_value=0.0,
-            max_value=7000.0,
-            value=0.0,
-            step=500.0,
-            key="custom_ira"
-        )
-    
-    if st.button("🚀 Run Simulation", type="primary", key="run_custom_sim"):
-        changes = {}
-        if add_401k > 0:
-            changes["extra_401k_traditional"] = add_401k
-        if add_hsa > 0:
-            changes["extra_hsa"] = add_hsa
-        if add_ira > 0:
-            changes["extra_ira_traditional"] = add_ira
-        
-        if changes:
-            sim = simulator.run_simulation(changes, "Custom Scenario")
-            st.session_state.simulations.insert(0, sim)
+    if not ai_client.is_connected:
+        st.warning("🔴 **AI Required** - Add `OPENAI_API_KEY` to use What-If scenarios")
+    else:
+        # Baseline data
+        if st.session_state.tax_result:
+            st.markdown("**Using your current tax data as baseline:**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Gross Income", fmt_currency(st.session_state.tax_result['gross_income']))
+            with col2:
+                st.metric("Federal Tax", fmt_currency(st.session_state.tax_result['federal_tax']))
+            with col3:
+                st.metric("Effective Rate", f"{st.session_state.tax_result['effective_rate']:.1f}%")
         else:
-            st.warning("Please enter at least one value to simulate")
-    
-    # Results
-    st.markdown("---")
-    st.markdown("**Simulation Results**")
-    
-    if st.session_state.simulations:
-        for i, sim in enumerate(st.session_state.simulations[:5]):
-            is_beneficial = sim.is_beneficial
-            savings = abs(sim.tax_difference)
-            
-            icon = "✅" if is_beneficial else "⚠️"
-            
-            with st.container():
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.markdown(f"**{icon} {sim.scenario_name}**")
-                    st.caption(sim.summary)
-                with col2:
-                    if is_beneficial:
-                        st.success(f"Save {fmt_currency(savings)}")
-                    else:
-                        st.error(f"+{fmt_currency(savings)}")
-    else:
-        st.info("Run a simulation to see results here")
-
-
-# =============================================================================
-# TAB 5: AI STRATEGIES
-# =============================================================================
-
-with tab5:
-    st.markdown("### 🤖 AI-Powered Tax Strategies")
-    st.markdown("Get personalized tax reduction strategies powered by GPT-5.1 with adaptive reasoning")
-    
-    # Show aggregated income summary
-    all_sources = list(st.session_state.enhanced_profile.income_sources)
-    if st.session_state.enhanced_profile.spouse:
-        all_sources.extend(st.session_state.enhanced_profile.spouse.sources)
-    
-    if all_sources:
-        total_income = sum(s.ytd_gross for s in all_sources)
-        total_withheld = sum(s.ytd_federal_withheld for s in all_sources)
-        total_401k = sum(s.ytd_401k for s in all_sources)
+            st.info("Complete the Tax Gap Analysis first for more accurate scenarios, or describe your current situation below.")
         
-        with st.expander(f"📊 **Data to be analyzed: {len(all_sources)} income source(s) - Total: {fmt_currency(total_income)}**", expanded=True):
-            st.markdown("**Income Sources Being Analyzed:**")
-            for i, src in enumerate(all_sources):
-                st.markdown(f"- **{src.name}**: Income: {fmt_currency(src.ytd_gross)} | Withheld: {fmt_currency(src.ytd_federal_withheld)} | 401(k): {fmt_currency(src.ytd_401k)}")
-            
-            st.markdown("---")
-            st.markdown(f"""
-            **Aggregated Totals (sent to AI):**
-            - 💰 Total YTD Income: **{fmt_currency(total_income)}**
-            - 🏛️ Total Federal Withheld: **{fmt_currency(total_withheld)}**
-            - 🏦 Total 401(k): **{fmt_currency(total_401k)}**
-            - 📊 Projected Annual: **{fmt_currency(result.gross_income)}**
-            - 💵 Current Tax Liability: **{fmt_currency(result.total_tax_liability)}**
-            - 📈 Effective Tax Rate: **{result.effective_rate:.1f}%**
-            """)
-            st.info("🛡️ Only these financial numbers are sent to AI - NO personal information (SSN, names, addresses) is ever transmitted.")
-    else:
-        st.warning("⚠️ No income sources added yet. Please add income sources in the **Income** tab or **Upload Forms** tab first.")
-    
+        st.markdown("---")
+        
+        # Free-text input for life changes
+        st.markdown("### Describe Your Potential Life Changes")
+        st.markdown("*Enter any changes you're considering in plain English*")
+        
+        what_if_text = st.text_area(
+            "What changes are you considering?",
+            placeholder="""Examples:
+• I might get a $15,000 raise next year
+• We're planning to have a baby in March
+• I'm thinking about buying a house for $400,000
+• I might start a side business selling crafts
+• I'm considering maxing out my 401(k)
+• We might get married in June""",
+            height=150,
+            key="what_if_input"
+        )
+        
+        if what_if_text and st.button("🔮 Analyze Impact", type="primary", use_container_width=True):
+            with st.spinner("AI is analyzing your scenario..."):
+                base_data = st.session_state.tax_result or {
+                    'gross_income': 75000,
+                    'federal_tax': 9000,
+                    'filing_status': st.session_state.filing_status.value,
+                    'deduction_amount': 14600
+                }
+                
+                result = analyze_what_if(base_data, what_if_text)
+                
+                if 'error' in result:
+                    st.error(f"Analysis error: {result['error']}")
+                else:
+                    st.markdown("---")
+                    st.markdown("### 📊 Impact Analysis")
+                    
+                    # Summary
+                    st.markdown(f"**Summary:** {result.get('summary', 'Analysis complete.')}")
+                    
+                    st.markdown("---")
+                    
+                    # Changes interpreted
+                    st.markdown("**Changes Analyzed:**")
+                    for change in result.get('interpreted_changes', []):
+                        st.markdown(f"- **{change.get('change', '')}**: {change.get('tax_impact', '')}")
+                    
+                    st.markdown("---")
+                    
+                    # New projections
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        new_income = result.get('new_estimated_income', 0)
+                        old_income = base_data.get('gross_income', 0)
+                        st.metric(
+                            "New Estimated Income",
+                            fmt_currency(new_income),
+                            fmt_currency(new_income - old_income)
+                        )
+                    
+                    with col2:
+                        new_tax = result.get('new_estimated_tax', 0)
+                        old_tax = base_data.get('federal_tax', 0)
+                        st.metric(
+                            "New Federal Tax",
+                            fmt_currency(new_tax),
+                            fmt_currency(new_tax - old_tax)
+                        )
+                    
+                    with col3:
+                        diff = result.get('tax_difference', 0)
+                        if diff > 0:
+                            st.metric("Tax Impact", f"+{fmt_currency(diff)}", "More tax")
+                        else:
+                            st.metric("Tax Impact", fmt_currency(diff), "Less tax", delta_color="inverse")
+                    
+                    # New credits
+                    if result.get('new_credits'):
+                        st.markdown("---")
+                        st.markdown("**New Tax Credits Available:**")
+                        for credit in result['new_credits']:
+                            st.markdown(f"- **{credit.get('credit', '')}**: {fmt_currency(credit.get('amount', 0))}")
+                    
+                    # Recommendations
+                    if result.get('recommendations'):
+                        st.markdown("---")
+                        st.markdown("**💡 Recommendations:**")
+                        for rec in result['recommendations']:
+                            st.markdown(f"- {rec}")
+
+
+# =============================================================================
+# SIDEBAR - MINIMAL
+# =============================================================================
+
+with st.sidebar:
+    st.markdown("### 🛡️ TaxGuard AI")
     st.markdown("---")
     
     # AI Status
     ai_client = get_ai_client()
-    
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        if ai_client.is_connected:
-            st.success("🟢 **Connected to OpenAI GPT-5.1** - AI-powered analysis available")
-        else:
-            st.warning("🔴 **AI Offline** - Add `OPENAI_API_KEY` to Streamlit secrets for personalized strategies")
-    
-    with col2:
-        st.markdown(f"**Model:** `{ai_client.model}`")
-    
-    st.markdown("---")
-    
-    # Generate AI Strategies Button
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        generate_btn = st.button(
-            "🚀 Generate AI Tax Strategies",
-            type="primary",
-            use_container_width=True,
-            key="generate_ai_strategies",
-            disabled=not all_sources  # Disable if no income sources
-        )
-    
-    if generate_btn:
-        # Create a prominent privacy notice at the top
-        privacy_notice = st.empty()
-        privacy_notice.info("🛡️ **Privacy Protection Active** - Your personal information will be removed before any data is sent to AI")
-        
-        # Show the privacy pipeline
-        pipeline_placeholder = st.empty()
-        status_placeholder = st.empty()
-        
-        pipeline_steps = [
-            {"title": "Collecting Financial Data", "description": "Gathering income, deductions, and tax information from your profile...", "icon": "📊"},
-            {"title": "Scanning for Personal Information", "description": "Detecting SSN, names, addresses, phone numbers, emails, account numbers...", "icon": "🔍"},
-            {"title": "Removing All PII", "description": "Replacing personal identifiers with anonymous placeholders...", "icon": "🚫"},
-            {"title": "Verifying Anonymization", "description": "Double-checking that NO personal information remains...", "icon": "✓"},
-            {"title": "Secure Transmission", "description": "Sending ONLY anonymized financial numbers to GPT-5.1...", "icon": "🔐"},
-            {"title": "AI Analysis in Progress", "description": "GPT-5.1 analyzing your tax situation with adaptive reasoning...", "icon": "🤖"},
-        ]
-        
-        # Step 1: Collecting data
-        status_placeholder.warning("⏳ Step 1/6: Collecting your financial data...")
-        show_pii_pipeline(pipeline_placeholder, 0, pipeline_steps)
-        time.sleep(0.6)
-        
-        # Step 2: Scanning for PII
-        status_placeholder.warning("⏳ Step 2/6: Scanning for personal information...")
-        show_pii_pipeline(pipeline_placeholder, 1, pipeline_steps)
-        time.sleep(0.7)
-        
-        # Actually anonymize the data (pass number of income sources for context)
-        num_sources = len(all_sources) if all_sources else 1
-        anonymized_profile = create_anonymized_profile(profile, num_income_sources=num_sources)
-        anonymized_result = create_anonymized_tax_result(result)
-        
-        pii_removed = [
-            "Social Security Numbers (SSN)",
-            "Full Names", 
-            "Street Addresses",
-            "Phone Numbers",
-            "Email Addresses", 
-            "Bank Account Numbers",
-            "Employer Identification Numbers (EIN)"
-        ]
-        
-        # Step 3: Removing PII
-        status_placeholder.warning("⏳ Step 3/6: Removing all personal information...")
-        show_pii_pipeline(pipeline_placeholder, 2, pipeline_steps, pii_removed)
-        time.sleep(0.8)
-        
-        # Step 4: Verifying
-        status_placeholder.warning("⏳ Step 4/6: Verifying complete anonymization...")
-        show_pii_pipeline(pipeline_placeholder, 3, pipeline_steps, pii_removed)
-        time.sleep(0.5)
-        
-        # Step 5: Secure transmission
-        status_placeholder.warning("⏳ Step 5/6: Establishing secure connection to GPT-5.1...")
-        show_pii_pipeline(pipeline_placeholder, 4, pipeline_steps, pii_removed)
-        time.sleep(0.4)
-        
-        # Step 6: AI Analysis
-        status_placeholder.info("🤖 Step 6/6: GPT-5.1 is analyzing your tax situation...")
-        show_pii_pipeline(pipeline_placeholder, 5, pipeline_steps, pii_removed)
-        
-        # Make the AI call
-        response = ai_client.generate_strategies(
-            anonymized_profile=anonymized_profile,
-            current_tax_result=anonymized_result
-        )
-        
-        # Clear the pipeline display
-        pipeline_placeholder.empty()
-        status_placeholder.empty()
-        privacy_notice.empty()
-        
-        if response.success:
-            st.session_state.ai_strategies = response.content
-            
-            # Show success message with privacy confirmation
-            tokens_msg = f" ({response.tokens_used} tokens used)" if response.tokens_used else ""
-            st.success(f"✅ Strategies generated successfully!{tokens_msg}")
-            st.info("🛡️ **Privacy Confirmed**: Only anonymized financial data was sent to GPT-5.1. Your personal information (SSN, name, address, etc.) was never transmitted.")
-        else:
-            st.error(f"Error generating strategies: {response.error}")
-    
-    # Display AI Strategies
-    if st.session_state.ai_strategies:
-        st.markdown("---")
-        
-        # Show what data was sent
-        with st.expander("🔍 View Anonymized Data Sent to AI", expanded=False):
-            st.markdown("**This is the ONLY data that was sent to the AI - no personal information:**")
-            
-            anonymized_profile = create_anonymized_profile(profile)
-            anonymized_result = create_anonymized_tax_result(result)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**Financial Profile (Anonymized):**")
-                st.json(anonymized_profile)
-            with col2:
-                st.markdown("**Tax Calculation Results:**")
-                st.json(anonymized_result)
-        
-        st.markdown("### 📋 Your Personalized Tax Strategies")
-        st.markdown(st.session_state.ai_strategies)
-    
-    # Custom AI Question
-    st.markdown("---")
-    st.markdown("### 💬 Ask the AI a Tax Question")
-    
-    custom_question = st.text_area(
-        "Describe a tax scenario or ask a question:",
-        placeholder="e.g., 'What if I started a side business?' or 'Should I convert my Traditional IRA to a Roth?'",
-        key="ai_custom_question"
-    )
-    
-    if st.button("🔍 Analyze Scenario", key="analyze_scenario_btn"):
-        if custom_question:
-            # Show privacy pipeline for scenario analysis
-            st.info("🛡️ **Privacy Protection Active** - Anonymizing your data before AI analysis...")
-            
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            status_text.text("Step 1/4: Collecting financial context...")
-            progress_bar.progress(25)
-            time.sleep(0.3)
-            
-            status_text.text("Step 2/4: Removing personal information (SSN, names, addresses)...")
-            progress_bar.progress(50)
-            anonymized_profile = create_anonymized_profile(profile)
-            anonymized_result = create_anonymized_tax_result(result)
-            time.sleep(0.4)
-            
-            status_text.text("Step 3/4: Verifying anonymization complete...")
-            progress_bar.progress(75)
-            time.sleep(0.3)
-            
-            status_text.text("Step 4/4: GPT-5.1 analyzing your scenario...")
-            progress_bar.progress(100)
-            
-            response = ai_client.analyze_scenario(
-                scenario_description=custom_question,
-                anonymized_profile=anonymized_profile,
-                current_tax_result=anonymized_result
-            )
-            
-            # Clear progress
-            progress_bar.empty()
-            status_text.empty()
-            
-            if response.success:
-                st.success("🛡️ Analysis complete! Only anonymized data was sent to GPT-5.1.")
-                st.markdown("### Analysis Results")
-                st.markdown(response.content)
-            else:
-                st.error(f"Error: {response.error}")
-        else:
-            st.warning("Please enter a question or scenario to analyze")
-
-
-# =============================================================================
-# TAB 6: RECOMMENDATIONS
-# =============================================================================
-
-with tab6:
-    recs = st.session_state.recommendations
-    
-    if recs:
-        # Summary Banner
-        st.success(f"💰 **Maximum Potential Tax Savings: {fmt_currency(recs.max_potential_savings)}** — {recs.days_until_year_end} days left to take action this year")
-        
-        # Basic Recommendations
-        st.markdown("### 🎯 Basic Recommendations")
-        st.markdown("*Actions anyone can take*")
-        
-        for rec in recs.basic_recommendations:
-            priority_icon = "🔴" if rec.priority.value in ['critical', 'high'] else "🟡" if rec.priority.value == 'medium' else "🟢"
-            
-            with st.expander(f"{priority_icon} {rec.title} — Save {fmt_currency(rec.potential_tax_savings)}"):
-                st.write(rec.description)
-                st.markdown(f"**Action Required:** {rec.action_required}")
-                
-                if rec.remaining_contribution_room:
-                    st.info(f"💰 Room Remaining: {fmt_currency(rec.remaining_contribution_room)}")
-                
-                if rec.per_paycheck_amount:
-                    st.info(f"📅 Per Paycheck: {fmt_currency(rec.per_paycheck_amount)}")
-                
-                if rec.warnings:
-                    for w in rec.warnings:
-                        st.warning(w)
-        
-        # Advanced Recommendations
-        if recs.advanced_recommendations:
-            st.markdown("---")
-            st.markdown("### 🚀 Advanced Strategies")
-            st.markdown("*Life-changing opportunities that may require professional guidance*")
-            
-            for rec in recs.advanced_recommendations[:10]:
-                with st.expander(f"💼 {rec.title}"):
-                    st.write(rec.description)
-                    st.markdown(f"**Action:** {rec.action_required}")
-                    
-                    if rec.potential_tax_savings > 0:
-                        st.success(f"Potential Savings: {fmt_currency(rec.potential_tax_savings)}")
-                    
-                    if rec.requires_professional:
-                        st.info("👔 Consider consulting a tax professional")
-                    
-                    if rec.warnings:
-                        for w in rec.warnings:
-                            st.warning(w)
+    if ai_client.is_connected:
+        st.success("🟢 GPT-5.1 Connected")
     else:
-        st.info("Add income data to receive personalized recommendations")
-
-
-# =============================================================================
-# TAB 7: PRIVACY
-# =============================================================================
-
-with tab7:
-    st.markdown("### 🔒 Privacy Air Gap Technology")
-    st.markdown("""
-        TaxGuard AI uses a "Privacy Air Gap" to ensure your personal information 
-        **NEVER** reaches external AI services.
-    """)
-    
-    # How it works - Visual Pipeline
-    st.markdown("### How Your Data is Protected")
-    
-    st.markdown("""
-        <div class="privacy-pipeline">
-            <div class="pipeline-step completed">
-                <div class="pipeline-icon">1️⃣</div>
-                <div>
-                    <div style="font-weight: 500;">You Enter Data</div>
-                    <div style="font-size: 0.85rem; opacity: 0.8;">Income, deductions, personal info</div>
-                </div>
-            </div>
-            <div class="pipeline-step completed">
-                <div class="pipeline-icon">2️⃣</div>
-                <div>
-                    <div style="font-weight: 500;">PII Detection</div>
-                    <div style="font-size: 0.85rem; opacity: 0.8;">AI + Regex identifies SSN, names, addresses</div>
-                </div>
-            </div>
-            <div class="pipeline-step completed">
-                <div class="pipeline-icon">3️⃣</div>
-                <div>
-                    <div style="font-weight: 500;">PII Removal</div>
-                    <div style="font-size: 0.85rem; opacity: 0.8;">Personal info replaced with [REDACTED]</div>
-                </div>
-            </div>
-            <div class="pipeline-step completed">
-                <div class="pipeline-icon">4️⃣</div>
-                <div>
-                    <div style="font-weight: 500;">AI Processing</div>
-                    <div style="font-size: 0.85rem; opacity: 0.8;">Only anonymized numbers sent to GPT-5.1</div>
-                </div>
-            </div>
-            <div class="pipeline-step completed">
-                <div class="pipeline-icon">5️⃣</div>
-                <div>
-                    <div style="font-weight: 500;">Results Returned</div>
-                    <div style="font-size: 0.85rem; opacity: 0.8;">Strategies based on your financial situation</div>
-                </div>
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    # What gets removed vs what gets sent
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-            ### 🚫 What is REMOVED
-            
-            Before any data goes to AI:
-            - ❌ Social Security Numbers
-            - ❌ Names (yours, spouse, employer)
-            - ❌ Addresses
-            - ❌ Phone Numbers
-            - ❌ Email Addresses
-            - ❌ Bank Account Numbers
-            - ❌ Employer IDs (EIN)
-            - ❌ Any identifying text
-        """)
-    
-    with col2:
-        st.markdown("""
-            ### ✅ What IS Sent to AI
-            
-            Only anonymized financial data:
-            - ✅ Income amounts (no source names)
-            - ✅ Tax withholding amounts
-            - ✅ Deduction totals
-            - ✅ Filing status
-            - ✅ Age bracket (not exact age)
-            - ✅ Number of dependents
-            - ✅ Contribution amounts
-            - ✅ Tax calculation results
-        """)
+        st.error("🔴 AI Offline")
+        st.caption("Add OPENAI_API_KEY in Settings")
     
     st.markdown("---")
     
-    # Live Demo
-    st.markdown("### 🔬 Try It Yourself")
+    # Quick stats
+    if st.session_state.income_sources:
+        st.metric("Income Sources", len(st.session_state.income_sources))
+        total = sum(s['projected_annual_income'] for s in st.session_state.income_sources)
+        st.metric("Total Income", fmt_currency(total))
     
-    demo_text = """ACME Corporation
-Employee: John A. Smith
-SSN: 123-45-6789
-Employee ID: E12345
-
-Pay Period: 10/01/2025 - 10/15/2025
-Pay Date: 10/20/2025
-
-Address: 123 Main Street, Anytown, CA 90210
-Email: john.smith@acme.com
-Phone: (555) 123-4567
-
-Gross Pay: $4,250.00
-Federal Tax: $425.00
-401(k): $425.00
-
-YTD Gross: $85,000.00
-YTD Federal: $8,500.00
-
-Employer EIN: 12-3456789"""
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("**📄 Original Document**")
-        input_text = st.text_area(
-            "Input",
-            value=demo_text,
-            height=350,
-            label_visibility="collapsed",
-            key="privacy_input"
-        )
-    
-    with col2:
-        st.markdown("**🛡️ After Redaction**")
-        
-        if st.button("🔍 Run PII Redaction", type="primary", key="redact_btn"):
-            # Show progress
-            with st.spinner("🔍 Scanning for personal information..."):
-                time.sleep(0.5)
-                
-                # Run redaction
-                redactor = PIIRedactor(use_ner=False)
-                redact_result = redactor.redact_sensitive_data(input_text)
-            
-            st.text_area(
-                "Output",
-                value=redact_result.redacted_text,
-                height=350,
-                disabled=True,
-                label_visibility="collapsed",
-                key="privacy_output"
-            )
-            
-            st.success(f"✅ Redacted **{redact_result.redaction_count}** PII items in **{redact_result.processing_time_ms:.1f}ms**")
-            
-            if redact_result.pii_types_found:
-                st.markdown("**PII Types Detected & Removed:**")
-                for pii_type in redact_result.pii_types_found:
-                    st.markdown(f"- 🚫 {pii_type}")
+    if st.session_state.tax_gap is not None:
+        if st.session_state.tax_gap >= 0:
+            st.metric("Expected Refund", fmt_currency(st.session_state.tax_gap))
         else:
-            st.text_area(
-                "Output",
-                value="Click 'Run PII Redaction' to see the result...",
-                height=350,
-                disabled=True,
-                label_visibility="collapsed",
-                key="privacy_placeholder"
-            )
-
-
-# =============================================================================
-# FOOTER
-# =============================================================================
-
-st.markdown("---")
-
-st.caption("""
-    ⚠️ **Disclaimer:** TaxGuard AI provides estimates only and is not a substitute for professional tax advice.
-    Calculations are based on 2025 federal tax rules and may not account for all deductions, credits, or individual circumstances.
+            st.metric("Amount Owed", fmt_currency(abs(st.session_state.tax_gap)))
     
-    🛡️ TaxGuard AI — Privacy-First Tax Estimation — **Your personal data NEVER leaves your device**
-""")
+    st.markdown("---")
+    
+    # Reset button
+    if st.button("🔄 Start Over", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+    
+    st.markdown("---")
+    st.caption("© 2025 TaxGuard AI")
+    st.caption("Privacy-First Tax Planning")

@@ -315,6 +315,12 @@ def init_session_state():
             'charitable': 0,
             'medical': 0,
             'other': 0,
+            'rental_income': 0,
+            'rental_mortgage_interest': 0,
+            'rental_property_taxes': 0,
+            'rental_expenses': 0,
+            'business_expenses': 0,
+            'student_loan_interest': 0,
             'user_notes': ''
         }
     
@@ -351,9 +357,10 @@ def calculate_projected_withholding(sources: List[Dict]) -> float:
     """Calculate projected year-end withholding from all sources."""
     total_withheld = 0
     for src in sources:
-        ytd_withheld = src.get('ytd_federal_withheld', 0)
-        current_period = src.get('current_pay_period', 24)
-        pay_freq = src.get('pay_frequency', 'biweekly')
+        # Use abs() to handle negative values from extraction
+        ytd_withheld = abs(src.get('ytd_federal_withheld', 0) or 0)
+        current_period = src.get('current_pay_period', 24) or 24
+        pay_freq = src.get('pay_frequency', 'biweekly') or 'biweekly'
         
         periods_per_year = {
             'weekly': 52, 'biweekly': 26, 'semimonthly': 24, 'monthly': 12
@@ -373,28 +380,59 @@ def calculate_projected_withholding(sources: List[Dict]) -> float:
 def calculate_true_liability(sources: List[Dict], deductions: Dict, filing_status: FilingStatus) -> Dict:
     """Calculate true tax liability with standard vs itemized comparison."""
     
-    # Calculate total income
-    total_income = sum(src.get('projected_annual_income', src.get('ytd_gross', 0)) for src in sources)
+    # Calculate total income (use abs to handle any negative values)
+    total_income = sum(abs(src.get('projected_annual_income', src.get('ytd_gross', 0)) or 0) for src in sources)
+    
+    # Add any additional income like rental income
+    rental_income = abs(deductions.get('rental_income', 0) or 0)
+    total_income += rental_income
     
     # Standard deduction
     standard_ded = STANDARD_DEDUCTION_2025.get(filing_status, 14600)
     
-    # Itemized deductions
+    # Itemized deductions - include ALL possible fields
+    mortgage_interest = abs(deductions.get('mortgage_interest', 0) or 0)
+    property_taxes = abs(deductions.get('property_taxes', 0) or 0)
+    state_local_taxes = abs(deductions.get('state_local_taxes', 0) or 0)
+    charitable = abs(deductions.get('charitable', 0) or 0)
+    medical = abs(deductions.get('medical', 0) or 0)
+    other = abs(deductions.get('other', 0) or 0)
+    
+    # Rental property deductions (these reduce rental income, but excess can offset other income)
+    rental_mortgage = abs(deductions.get('rental_mortgage_interest', 0) or 0)
+    rental_property_tax = abs(deductions.get('rental_property_taxes', 0) or 0)
+    rental_expenses = abs(deductions.get('rental_expenses', 0) or 0)
+    
+    # Business expenses (Schedule C)
+    business_expenses = abs(deductions.get('business_expenses', 0) or 0)
+    
+    # Student loan interest (above-the-line, max $2,500)
+    student_loan = min(abs(deductions.get('student_loan_interest', 0) or 0), 2500)
+    
+    # Calculate itemized total
+    # Note: Rental expenses offset rental income, not itemized
     itemized_ded = (
-        deductions.get('mortgage_interest', 0) +
-        deductions.get('property_taxes', 0) +
-        min(deductions.get('state_local_taxes', 0), 10000) +  # SALT cap
-        deductions.get('charitable', 0) +
-        max(0, deductions.get('medical', 0) - total_income * 0.075) +  # 7.5% AGI floor
-        deductions.get('other', 0)
+        mortgage_interest +
+        property_taxes +
+        min(state_local_taxes, 10000) +  # SALT cap $10,000
+        charitable +
+        max(0, medical - total_income * 0.075) +  # 7.5% AGI floor for medical
+        other
     )
+    
+    # Rental property deductions offset rental income
+    net_rental_income = max(0, rental_income - rental_mortgage - rental_property_tax - rental_expenses)
+    
+    # Adjust total income for net rental
+    adjusted_income = total_income - rental_income + net_rental_income - student_loan - business_expenses
+    adjusted_income = max(0, adjusted_income)
     
     # Choose better deduction
     use_itemized = itemized_ded > standard_ded
     deduction_amount = itemized_ded if use_itemized else standard_ded
     
     # Taxable income
-    taxable_income = max(0, total_income - deduction_amount)
+    taxable_income = max(0, adjusted_income - deduction_amount)
     
     # Calculate federal tax using brackets
     brackets = TAX_BRACKETS_2025.get(filing_status, TAX_BRACKETS_2025[FilingStatus.SINGLE])
@@ -425,6 +463,7 @@ def calculate_true_liability(sources: List[Dict], deductions: Dict, filing_statu
     
     return {
         'gross_income': total_income,
+        'adjusted_gross_income': adjusted_income,
         'deduction_type': 'itemized' if use_itemized else 'standard',
         'deduction_amount': deduction_amount,
         'standard_deduction': standard_ded,
@@ -432,7 +471,9 @@ def calculate_true_liability(sources: List[Dict], deductions: Dict, filing_statu
         'taxable_income': taxable_income,
         'federal_tax': federal_tax,
         'effective_rate': effective_rate,
-        'marginal_rate': marginal_rate
+        'marginal_rate': marginal_rate,
+        'rental_income': rental_income,
+        'net_rental_income': net_rental_income,
     }
 
 
@@ -449,37 +490,46 @@ The document has had personal information (SSN, names, addresses) removed for pr
 DOCUMENT TEXT:
 {text}
 
-Extract and return in JSON format:
+IMPORTANT EXTRACTION RULES:
+1. For YTD values, look for "Year to Date", "YTD", "Y-T-D" totals
+2. For TOTAL EARNINGS, include: base salary + bonuses + RSUs + stock compensation + commissions + overtime
+3. Federal tax withheld should be a POSITIVE number (even if shown as negative on paystub)
+4. Pay attention to "Total Gross" or "Gross Earnings" which includes ALL compensation types
+5. Look for "Stock", "RSU", "Equity", "Bonus" line items and ADD them to gross
+
+Extract and return in JSON format with POSITIVE numbers:
 {{
     "document_type": "{doc_type}",
     "employer_name": "<string or null>",
-    "current_gross_pay": <number or null>,
-    "current_federal_withheld": <number or null>,
+    "current_gross_pay": <number - THIS PERIOD total including stocks/bonuses>,
+    "current_federal_withheld": <POSITIVE number>,
     "current_state_withheld": <number or null>,
     "current_social_security": <number or null>,
     "current_medicare": <number or null>,
     "current_401k": <number or null>,
     "current_net_pay": <number or null>,
-    "ytd_gross": <number or null>,
-    "ytd_federal_withheld": <number or null>,
+    "ytd_gross": <number - YEAR TO DATE total earnings including ALL compensation>,
+    "ytd_federal_withheld": <POSITIVE number - total federal tax withheld YTD>,
     "ytd_state_withheld": <number or null>,
     "ytd_social_security": <number or null>,
     "ytd_medicare": <number or null>,
     "ytd_401k": <number or null>,
+    "ytd_stock_compensation": <number - RSUs, stock awards, equity if listed separately>,
+    "ytd_bonus": <number - bonuses if listed separately>,
     "pay_frequency": "<weekly/biweekly/semimonthly/monthly or null>",
     "pay_period_number": <number or null>,
     "pay_date": "<date string or null>",
-    "hourly_rate": <number or null>,
-    "hours_worked": <number or null>
+    "notes": "<any important observations about the data>"
 }}
 
+CRITICAL: All tax withheld values must be POSITIVE. If ytd_gross seems low, check if stock/RSU/bonus is listed separately and ADD it.
 Return ONLY valid JSON."""
 
     try:
         response = ai_client.client.chat.completions.create(
             model=ai_client.model,
             messages=[
-                {"role": "system", "content": "You are an expert financial document parser. Extract data with high precision. Return valid JSON only."},
+                {"role": "system", "content": "You are an expert payroll document parser. Extract ALL compensation including stocks, RSUs, bonuses. Return POSITIVE numbers for taxes withheld."},
                 {"role": "user", "content": extraction_prompt}
             ]
         )
@@ -492,7 +542,22 @@ Return ONLY valid JSON."""
         elif "```" in ai_response:
             ai_response = ai_response.split("```")[1].split("```")[0]
         
-        return json.loads(ai_response)
+        data = json.loads(ai_response)
+        
+        # Ensure key financial values are positive
+        for key in ['ytd_federal_withheld', 'current_federal_withheld', 'ytd_gross', 'current_gross_pay']:
+            if key in data and data[key] is not None:
+                data[key] = abs(data[key])
+        
+        # Add stock/bonus to gross if they were extracted separately
+        if data.get('ytd_stock_compensation') and data.get('ytd_gross'):
+            # Check if stock wasn't already included (simple heuristic)
+            stock = abs(data['ytd_stock_compensation'])
+            if stock > 1000:  # Significant stock compensation
+                data['ytd_gross_base'] = data['ytd_gross']
+                data['notes'] = data.get('notes', '') + f" Stock/RSU of ${stock:,.0f} detected."
+        
+        return data
     except Exception as e:
         st.error(f"AI extraction error: {e}")
         return None
@@ -638,31 +703,46 @@ def process_deduction_input(text: str) -> Dict:
     if not ai_client.is_connected or not ai_client.client:
         return None
     
-    prompt = f"""Parse this free-text description of tax deductions and extract amounts.
+    prompt = f"""Parse this description of tax-related items. Carefully identify INCOME vs DEDUCTIONS.
 
 USER INPUT:
 {text}
 
-Return JSON with extracted deduction amounts:
+IMPORTANT RULES:
+- "Rental income" is INCOME, not a deduction
+- "Mortgage interest" is a DEDUCTION
+- "Property tax" is a DEDUCTION  
+- "Rental property expenses/repairs/maintenance" are DEDUCTIONS against rental income
+- "Donations/charitable" are DEDUCTIONS
+- All values should be POSITIVE numbers
+
+Return JSON with extracted amounts (use 0 if not mentioned):
 {{
-    "mortgage_interest": <number or 0>,
-    "property_taxes": <number or 0>,
-    "state_local_taxes": <number or 0>,
-    "charitable": <number or 0>,
-    "medical": <number or 0>,
-    "student_loan_interest": <number or 0>,
-    "business_expenses": <number or 0>,
-    "other": <number or 0>,
+    "mortgage_interest": <number - primary home mortgage interest>,
+    "property_taxes": <number - primary home property taxes>,
+    "state_local_taxes": <number - state/local income or sales taxes>,
+    "charitable": <number - charitable donations>,
+    "medical": <number - medical expenses>,
+    "student_loan_interest": <number - student loan interest paid>,
+    "business_expenses": <number - self-employment/business expenses>,
+    "rental_income": <number - gross rental income received>,
+    "rental_mortgage_interest": <number - mortgage interest on rental property>,
+    "rental_property_taxes": <number - property taxes on rental property>,
+    "rental_expenses": <number - repairs, maintenance, management fees on rental>,
+    "other": <number - other deductible expenses>,
+    "parsed_items": [
+        {{"item": "description", "amount": <number>, "category": "income/deduction"}}
+    ],
     "notes": "any clarifying notes"
 }}
 
-Return ONLY valid JSON."""
+Return ONLY valid JSON with POSITIVE numbers."""
 
     try:
         response = ai_client.client.chat.completions.create(
             model=ai_client.model,
             messages=[
-                {"role": "system", "content": "Extract deduction amounts from natural language. Be precise."},
+                {"role": "system", "content": "You are a tax expert. Parse financial items accurately. Distinguish income from deductions. Return positive numbers."},
                 {"role": "user", "content": prompt}
             ]
         )
@@ -674,8 +754,16 @@ Return ONLY valid JSON."""
         elif "```" in ai_response:
             ai_response = ai_response.split("```")[1].split("```")[0]
         
-        return json.loads(ai_response)
-    except:
+        parsed = json.loads(ai_response)
+        
+        # Ensure all values are positive
+        for key in parsed:
+            if isinstance(parsed[key], (int, float)) and parsed[key] < 0:
+                parsed[key] = abs(parsed[key])
+        
+        return parsed
+    except Exception as e:
+        st.error(f"Parsing error: {e}")
         return None
 
 
@@ -964,36 +1052,125 @@ with tab2:
         )
         
         if deduction_text and st.button("🤖 Parse Deductions with AI", key="parse_deductions"):
-            parsed = process_deduction_input(deduction_text)
-            if parsed:
-                st.session_state.deductions.update(parsed)
-                st.success("✅ Deductions parsed!")
-                st.rerun()
+            with st.spinner("Parsing your deductions..."):
+                parsed = process_deduction_input(deduction_text)
+                if parsed:
+                    st.session_state.deductions.update(parsed)
+                    st.session_state.show_parsed = True
+                    st.success("✅ Deductions parsed! Review below:")
+                    st.rerun()
+        
+        # Show parsed deductions if just parsed
+        if st.session_state.deductions.get('parsed_items') or any(v > 0 for k, v in st.session_state.deductions.items() if isinstance(v, (int, float))):
+            with st.expander("📋 **Parsed Deductions (click to review)**", expanded=True):
+                st.markdown("**What we found:**")
+                
+                # Show itemized breakdown
+                ded = st.session_state.deductions
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("**Personal Deductions:**")
+                    if ded.get('mortgage_interest', 0) > 0:
+                        st.markdown(f"- Mortgage Interest: **{fmt_currency(ded['mortgage_interest'])}**")
+                    if ded.get('property_taxes', 0) > 0:
+                        st.markdown(f"- Property Taxes: **{fmt_currency(ded['property_taxes'])}**")
+                    if ded.get('state_local_taxes', 0) > 0:
+                        st.markdown(f"- State/Local Taxes: **{fmt_currency(ded['state_local_taxes'])}**")
+                    if ded.get('charitable', 0) > 0:
+                        st.markdown(f"- Charitable Donations: **{fmt_currency(ded['charitable'])}**")
+                    if ded.get('medical', 0) > 0:
+                        st.markdown(f"- Medical Expenses: **{fmt_currency(ded['medical'])}**")
+                
+                with col2:
+                    st.markdown("**Rental/Business:**")
+                    if ded.get('rental_income', 0) > 0:
+                        st.markdown(f"- Rental Income: **{fmt_currency(ded['rental_income'])}** *(taxable)*")
+                    if ded.get('rental_mortgage_interest', 0) > 0:
+                        st.markdown(f"- Rental Mortgage: **{fmt_currency(ded['rental_mortgage_interest'])}**")
+                    if ded.get('rental_property_taxes', 0) > 0:
+                        st.markdown(f"- Rental Property Tax: **{fmt_currency(ded['rental_property_taxes'])}**")
+                    if ded.get('rental_expenses', 0) > 0:
+                        st.markdown(f"- Rental Expenses: **{fmt_currency(ded['rental_expenses'])}**")
+                    if ded.get('business_expenses', 0) > 0:
+                        st.markdown(f"- Business Expenses: **{fmt_currency(ded['business_expenses'])}**")
+                
+                # Calculate totals
+                total_itemized = (
+                    ded.get('mortgage_interest', 0) +
+                    ded.get('property_taxes', 0) +
+                    min(ded.get('state_local_taxes', 0), 10000) +
+                    ded.get('charitable', 0) +
+                    ded.get('medical', 0)
+                )
+                
+                total_rental_deductions = (
+                    ded.get('rental_mortgage_interest', 0) +
+                    ded.get('rental_property_taxes', 0) +
+                    ded.get('rental_expenses', 0)
+                )
+                
+                st.markdown("---")
+                st.markdown(f"**📊 Total Itemized Deductions: {fmt_currency(total_itemized)}**")
+                if total_rental_deductions > 0:
+                    st.markdown(f"**🏠 Rental Property Deductions: {fmt_currency(total_rental_deductions)}** *(offsets rental income)*")
+                
+                # Compare to standard
+                std_ded = STANDARD_DEDUCTION_2025.get(st.session_state.filing_status, 14600)
+                if total_itemized > std_ded:
+                    st.success(f"✅ Itemizing saves you **{fmt_currency(total_itemized - std_ded)}** vs Standard Deduction!")
+                else:
+                    st.info(f"📋 Standard Deduction ({fmt_currency(std_ded)}) is still better for you")
+                
+                if ded.get('notes'):
+                    st.caption(f"Note: {ded['notes']}")
         
         # Manual deduction fields (collapsed)
         with st.expander("📝 Or enter deductions manually"):
+            st.markdown("**Personal Deductions:**")
             ded_col1, ded_col2 = st.columns(2)
             
             with ded_col1:
                 st.session_state.deductions['mortgage_interest'] = st.number_input(
-                    "Mortgage Interest", value=float(st.session_state.deductions.get('mortgage_interest', 0)), key="ded_mortgage"
+                    "Mortgage Interest", value=float(st.session_state.deductions.get('mortgage_interest', 0) or 0), key="ded_mortgage"
                 )
                 st.session_state.deductions['property_taxes'] = st.number_input(
-                    "Property Taxes", value=float(st.session_state.deductions.get('property_taxes', 0)), key="ded_property"
+                    "Property Taxes", value=float(st.session_state.deductions.get('property_taxes', 0) or 0), key="ded_property"
                 )
                 st.session_state.deductions['state_local_taxes'] = st.number_input(
-                    "State/Local Taxes", value=float(st.session_state.deductions.get('state_local_taxes', 0)), key="ded_salt"
+                    "State/Local Taxes (max $10k)", value=float(st.session_state.deductions.get('state_local_taxes', 0) or 0), key="ded_salt"
                 )
             
             with ded_col2:
                 st.session_state.deductions['charitable'] = st.number_input(
-                    "Charitable Donations", value=float(st.session_state.deductions.get('charitable', 0)), key="ded_charity"
+                    "Charitable Donations", value=float(st.session_state.deductions.get('charitable', 0) or 0), key="ded_charity"
                 )
                 st.session_state.deductions['medical'] = st.number_input(
-                    "Medical Expenses", value=float(st.session_state.deductions.get('medical', 0)), key="ded_medical"
+                    "Medical Expenses", value=float(st.session_state.deductions.get('medical', 0) or 0), key="ded_medical"
                 )
                 st.session_state.deductions['other'] = st.number_input(
-                    "Other Deductions", value=float(st.session_state.deductions.get('other', 0)), key="ded_other"
+                    "Other Deductions", value=float(st.session_state.deductions.get('other', 0) or 0), key="ded_other"
+                )
+            
+            st.markdown("---")
+            st.markdown("**Rental Property (if applicable):**")
+            rent_col1, rent_col2 = st.columns(2)
+            
+            with rent_col1:
+                st.session_state.deductions['rental_income'] = st.number_input(
+                    "Rental Income Received", value=float(st.session_state.deductions.get('rental_income', 0) or 0), key="ded_rental_income"
+                )
+                st.session_state.deductions['rental_mortgage_interest'] = st.number_input(
+                    "Rental Property Mortgage Interest", value=float(st.session_state.deductions.get('rental_mortgage_interest', 0) or 0), key="ded_rental_mortgage"
+                )
+            
+            with rent_col2:
+                st.session_state.deductions['rental_property_taxes'] = st.number_input(
+                    "Rental Property Taxes", value=float(st.session_state.deductions.get('rental_property_taxes', 0) or 0), key="ded_rental_tax"
+                )
+                st.session_state.deductions['rental_expenses'] = st.number_input(
+                    "Rental Expenses/Repairs", value=float(st.session_state.deductions.get('rental_expenses', 0) or 0), key="ded_rental_exp"
                 )
         
         st.markdown("---")
@@ -1057,9 +1234,14 @@ with tab2:
             with col2:
                 st.markdown("**Step B: True Tax Liability**")
                 st.markdown(f"- Gross Income: {fmt_currency(tax_result['gross_income'])}")
+                if tax_result.get('rental_income', 0) > 0:
+                    st.markdown(f"  - *(includes rental: {fmt_currency(tax_result['rental_income'])})*")
+                if tax_result.get('adjusted_gross_income') and tax_result['adjusted_gross_income'] != tax_result['gross_income']:
+                    st.markdown(f"- Adjusted Gross Income: {fmt_currency(tax_result['adjusted_gross_income'])}")
                 st.markdown(f"- Deduction ({tax_result['deduction_type'].title()}): -{fmt_currency(tax_result['deduction_amount'])}")
                 st.markdown(f"- Taxable Income: {fmt_currency(tax_result['taxable_income'])}")
                 st.markdown(f"- **Federal Tax: {fmt_currency(tax_result['federal_tax'])}**")
+                st.markdown(f"- Effective Rate: {tax_result['effective_rate']:.1f}%")
             
             # Deduction comparison
             st.markdown("---")
@@ -1072,6 +1254,23 @@ with tab2:
                 st.success(f"✅ **Itemized deductions ({fmt_currency(itemized)})** save you more than Standard ({fmt_currency(std)})")
             else:
                 st.info(f"📋 **Standard deduction ({fmt_currency(std)})** is better for you (Itemized would be {fmt_currency(itemized)})")
+            
+            # Show calculation breakdown
+            with st.expander("📊 See detailed calculation"):
+                st.markdown(f"""
+                **Tax Gap Calculation:**
+                - Projected Withholding: {fmt_currency(projected_withholding)}
+                - Minus Federal Tax Owed: {fmt_currency(tax_result['federal_tax'])}
+                - **= Tax Gap: {fmt_currency(tax_gap)}**
+                
+                **Itemized Deduction Breakdown:**
+                - Mortgage Interest: {fmt_currency(st.session_state.deductions.get('mortgage_interest', 0))}
+                - Property Taxes: {fmt_currency(st.session_state.deductions.get('property_taxes', 0))}
+                - State/Local (capped at $10k): {fmt_currency(min(st.session_state.deductions.get('state_local_taxes', 0), 10000))}
+                - Charitable: {fmt_currency(st.session_state.deductions.get('charitable', 0))}
+                - Medical (above 7.5% AGI): {fmt_currency(max(0, st.session_state.deductions.get('medical', 0) - tax_result['gross_income'] * 0.075))}
+                - **Total Itemized: {fmt_currency(itemized)}**
+                """)
 
 
 # =============================================================================
